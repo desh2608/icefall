@@ -19,38 +19,38 @@ Usage:
 
 (1) greedy search
 ./pruned_transducer_stateless/pretrained.py \
-        --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
-        --bpe-model ./data/lang_bpe_500/bpe.model \
-        --method greedy_search \
-        /path/to/foo.wav \
-        /path/to/bar.wav \
+    --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
+    --bpe-model ./data/lang_bpe_500/bpe.model \
+    --method greedy_search \
+    /path/to/foo.wav \
+    /path/to/bar.wav
 
 (2) beam search
 ./pruned_transducer_stateless/pretrained.py \
-        --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
-        --bpe-model ./data/lang_bpe_500/bpe.model \
-        --method beam_search \
-        --beam-size 4 \
-        /path/to/foo.wav \
-        /path/to/bar.wav \
+    --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
+    --bpe-model ./data/lang_bpe_500/bpe.model \
+    --method beam_search \
+    --beam-size 4 \
+    /path/to/foo.wav \
+    /path/to/bar.wav
 
 (3) modified beam search
 ./pruned_transducer_stateless/pretrained.py \
-        --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
-        --bpe-model ./data/lang_bpe_500/bpe.model \
-        --method modified_beam_search \
-        --beam-size 4 \
-        /path/to/foo.wav \
-        /path/to/bar.wav \
+    --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
+    --bpe-model ./data/lang_bpe_500/bpe.model \
+    --method modified_beam_search \
+    --beam-size 4 \
+    /path/to/foo.wav \
+    /path/to/bar.wav
 
 (4) fast beam search
 ./pruned_transducer_stateless/pretrained.py \
-        --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
-        --bpe-model ./data/lang_bpe_500/bpe.model \
-        --method fast_beam_search \
-        --beam-size 4 \
-        /path/to/foo.wav \
-        /path/to/bar.wav \
+    --checkpoint ./pruned_transducer_stateless/exp/pretrained.pt \
+    --bpe-model ./data/lang_bpe_500/bpe.model \
+    --method fast_beam_search \
+    --beam-size 4 \
+    /path/to/foo.wav \
+    /path/to/bar.wav
 
 You can also use `./pruned_transducer_stateless/exp/epoch-xx.pt`.
 
@@ -77,7 +77,9 @@ from beam_search import (
     modified_beam_search,
 )
 from torch.nn.utils.rnn import pad_sequence
-from train import get_params, get_transducer_model
+from train import add_model_arguments, get_params, get_transducer_model
+
+from icefall.utils import str2bool
 
 
 def get_parser():
@@ -177,6 +179,29 @@ def get_parser():
         --method is greedy_search.
         """,
     )
+    parser.add_argument(
+        "--simulate-streaming",
+        type=str2bool,
+        default=False,
+        help="""Whether to simulate streaming in decoding, this is a good way to
+        test a streaming model.
+        """,
+    )
+
+    parser.add_argument(
+        "--decode-chunk-size",
+        type=int,
+        default=16,
+        help="The chunk size for decoding (in frames after subsampling)",
+    )
+    parser.add_argument(
+        "--left-context",
+        type=int,
+        default=64,
+        help="left context can be seen during decoding (in frames after subsampling)",
+    )
+
+    add_model_arguments(parser)
 
     return parser
 
@@ -222,6 +247,11 @@ def main():
     params.unk_id = sp.piece_to_id("<unk>")
     params.vocab_size = sp.get_piece_size()
 
+    if params.simulate_streaming:
+        assert (
+            params.causal_convolution
+        ), "Decoding in streaming requires causal convolution"
+
     logging.info(f"{params}")
 
     device = torch.device("cpu")
@@ -232,6 +262,9 @@ def main():
 
     logging.info("Creating model")
     model = get_transducer_model(params)
+
+    num_param = sum([p.numel() for p in model.parameters()])
+    logging.info(f"Number of model parameters: {num_param}")
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     model.load_state_dict(checkpoint["model"], strict=False)
@@ -265,9 +298,18 @@ def main():
 
     feature_lengths = torch.tensor(feature_lengths, device=device)
 
-    encoder_out, encoder_out_lens = model.encoder(
-        x=features, x_lens=feature_lengths
-    )
+    if params.simulate_streaming:
+        encoder_out, encoder_out_lens, _ = model.encoder.streaming_forward(
+            x=features,
+            x_lens=feature_lengths,
+            chunk_size=params.decode_chunk_size,
+            left_context=params.left_context,
+            simulate_streaming=True,
+        )
+    else:
+        encoder_out, encoder_out_lens = model.encoder(
+            x=features, x_lens=feature_lengths
+        )
 
     num_waves = encoder_out.size(0)
     hyps = []

@@ -23,7 +23,8 @@ Usage:
 ./pruned_transducer_stateless2/export.py \
   --exp-dir ./pruned_transducer_stateless2/exp \
   --bpe-model data/lang_bpe_500/bpe.model \
-  --avg-last-n 10
+  --epoch 20 \
+  --avg 10
 
 It will generate a file exp_dir/pretrained.pt
 
@@ -33,7 +34,7 @@ you can do:
     cd /path/to/exp_dir
     ln -s pretrained.pt epoch-9999.pt
 
-    cd /path/to/egs/spgispeech/ASR
+    cd /path/to/egs/librispeech/ASR
     ./pruned_transducer_stateless2/decode.py \
         --exp-dir ./pruned_transducer_stateless2/exp \
         --epoch 9999 \
@@ -48,7 +49,7 @@ from pathlib import Path
 
 import sentencepiece as spm
 import torch
-from train import get_params, get_transducer_model
+from train import add_model_arguments, get_params, get_transducer_model
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -67,8 +68,19 @@ def get_parser():
         "--epoch",
         type=int,
         default=28,
-        help="It specifies the checkpoint to use for decoding."
-        "Note: Epoch counts from 0.",
+        help="""It specifies the checkpoint to use for averaging.
+        Note: Epoch counts from 0.
+        You can specify --avg to use more checkpoints for model averaging.""",
+    )
+
+    parser.add_argument(
+        "--iter",
+        type=int,
+        default=0,
+        help="""If positive, --epoch is ignored and it
+        will use the checkpoint exp_dir/checkpoint-iter.pt.
+        You can specify --avg to use more checkpoints for model averaging.
+        """,
     )
 
     parser.add_argument(
@@ -77,18 +89,7 @@ def get_parser():
         default=15,
         help="Number of checkpoints to average. Automatically select "
         "consecutive checkpoints before the checkpoint specified by "
-        "'--epoch'. ",
-    )
-
-    parser.add_argument(
-        "--avg-last-n",
-        type=int,
-        default=0,
-        help="""If positive, --epoch and --avg are ignored and it
-        will use the last n checkpoints exp_dir/checkpoint-xxx.pt
-        where xxx is the number of processed batches while
-        saving that checkpoint.
-        """,
+        "'--epoch' and '--iter'",
     )
 
     parser.add_argument(
@@ -123,14 +124,22 @@ def get_parser():
         "2 means tri-gram",
     )
 
+    parser.add_argument(
+        "--streaming-model",
+        type=str2bool,
+        default=False,
+        help="""Whether to export a streaming model, if the models in exp-dir
+        are streaming model, this should be True.
+        """,
+    )
+
+    add_model_arguments(parser)
     return parser
 
 
 def main():
     args = get_parser().parse_args()
     args.exp_dir = Path(args.exp_dir)
-
-    assert args.jit is False, "Support torchscript will be added later"
 
     params = get_params()
     params.update(vars(args))
@@ -148,6 +157,9 @@ def main():
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
 
+    if params.streaming_model:
+        assert params.causal_convolution
+
     logging.info(params)
 
     logging.info("About to create model")
@@ -155,8 +167,20 @@ def main():
 
     model.to(device)
 
-    if params.avg_last_n > 0:
-        filenames = find_checkpoints(params.exp_dir)[: params.avg_last_n]
+    if params.iter > 0:
+        filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
+            : params.avg
+        ]
+        if len(filenames) == 0:
+            raise ValueError(
+                f"No checkpoints found for"
+                f" --iter {params.iter}, --avg {params.avg}"
+            )
+        elif len(filenames) < params.avg:
+            raise ValueError(
+                f"Not enough checkpoints ({len(filenames)}) found for"
+                f" --iter {params.iter}, --avg {params.avg}"
+            )
         logging.info(f"averaging {filenames}")
         model.to(device)
         model.load_state_dict(average_checkpoints(filenames, device=device))
@@ -178,6 +202,11 @@ def main():
     model.eval()
 
     if params.jit:
+        # We won't use the forward() method of the model in C++, so just ignore
+        # it here.
+        # Otherwise, one of its arguments is a ragged tensor and is not
+        # torch scriptabe.
+        model.__class__.forward = torch.jit.ignore(model.__class__.forward)
         logging.info("Using torch.jit.script")
         model = torch.jit.script(model)
         filename = params.exp_dir / "cpu_jit.pt"

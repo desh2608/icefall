@@ -49,7 +49,7 @@ from pathlib import Path
 
 import sentencepiece as spm
 import torch
-from train import get_params, get_transducer_model
+from train import add_model_arguments, get_params, get_transducer_model
 
 from icefall.checkpoint import average_checkpoints, load_checkpoint
 from icefall.utils import str2bool
@@ -109,14 +109,23 @@ def get_parser():
         "2 means tri-gram",
     )
 
+    parser.add_argument(
+        "--streaming-model",
+        type=str2bool,
+        default=False,
+        help="""Whether to export a streaming model, if the models in exp-dir
+        are streaming model, this should be True.
+        """,
+    )
+
+    add_model_arguments(parser)
+
     return parser
 
 
 def main():
     args = get_parser().parse_args()
     args.exp_dir = Path(args.exp_dir)
-
-    assert args.jit is False, "Support torchscript will be added later"
 
     params = get_params()
     params.update(vars(args))
@@ -132,7 +141,11 @@ def main():
 
     # <blk> is defined in local/train_bpe_model.py
     params.blank_id = sp.piece_to_id("<blk>")
+    params.unk_id = sp.piece_to_id("<unk>")
     params.vocab_size = sp.get_piece_size()
+
+    if params.streaming_model:
+        assert params.causal_convolution
 
     logging.info(params)
 
@@ -159,6 +172,11 @@ def main():
     model.eval()
 
     if params.jit:
+        # We won't use the forward() method of the model in C++, so just ignore
+        # it here.
+        # Otherwise, one of its arguments is a ragged tensor and is not
+        # torch scriptabe.
+        model.__class__.forward = torch.jit.ignore(model.__class__.forward)
         logging.info("Using torch.jit.script")
         model = torch.jit.script(model)
         filename = params.exp_dir / "cpu_jit.pt"

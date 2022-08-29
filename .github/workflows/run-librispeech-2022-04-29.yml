@@ -59,6 +59,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           grep -v '^#' ./requirements-ci.txt  | xargs -n 1 -L 1 pip install
+          pip uninstall -y protobuf
+          pip install --no-binary protobuf protobuf
 
       - name: Cache kaldifeat
         id: my-cache
@@ -99,7 +101,7 @@ jobs:
         with:
           path: |
             ~/tmp/fbank-libri
-          key: cache-libri-fbank-test-clean-and-test-other
+          key: cache-libri-fbank-test-clean-and-test-other-v2
 
       - name: Compute fbank for LibriSpeech test-clean and test-other
         if: steps.libri-test-clean-and-test-other-fbank.outputs.cache-hit != 'true'
@@ -142,8 +144,8 @@ jobs:
           find fast_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
 
           echo "===modified beam search==="
-          find exp/modified_beam_search -name "log-*" -exec grep -n --color "best for test-clean" {} + | sort -n -k2
-          find exp/modified_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
+          find modified_beam_search -name "log-*" -exec grep -n --color "best for test-clean" {} + | sort -n -k2
+          find modified_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
 
       - name: Display decoding results for pruned_transducer_stateless3
         if: github.event_name == 'schedule' || github.event.label.name == 'run-decode'
@@ -161,8 +163,8 @@ jobs:
           find fast_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
 
           echo "===modified beam search==="
-          find exp/modified_beam_search -name "log-*" -exec grep -n --color "best for test-clean" {} + | sort -n -k2
-          find exp/modified_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
+          find modified_beam_search -name "log-*" -exec grep -n --color "best for test-clean" {} + | sort -n -k2
+          find modified_beam_search -name "log-*" -exec grep -n --color "best for test-other" {} + | sort -n -k2
 
       - name: Upload decoding results for pruned_transducer_stateless2
         uses: actions/upload-artifact@v2
