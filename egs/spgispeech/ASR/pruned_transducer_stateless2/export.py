@@ -23,8 +23,7 @@ Usage:
 ./pruned_transducer_stateless2/export.py \
   --exp-dir ./pruned_transducer_stateless2/exp \
   --bpe-model data/lang_bpe_500/bpe.model \
-  --epoch 20 \
-  --avg 10
+  --avg-last-n 10
 
 It will generate a file exp_dir/pretrained.pt
 
@@ -34,7 +33,7 @@ you can do:
     cd /path/to/exp_dir
     ln -s pretrained.pt epoch-9999.pt
 
-    cd /path/to/egs/librispeech/ASR
+    cd /path/to/egs/spgispeech/ASR
     ./pruned_transducer_stateless2/decode.py \
         --exp-dir ./pruned_transducer_stateless2/exp \
         --epoch 9999 \
@@ -49,7 +48,7 @@ from pathlib import Path
 
 import sentencepiece as spm
 import torch
-from train import add_model_arguments, get_params, get_transducer_model
+from train import get_params, get_transducer_model
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -68,9 +67,8 @@ def get_parser():
         "--epoch",
         type=int,
         default=28,
-        help="""It specifies the checkpoint to use for averaging.
-        Note: Epoch counts from 0.
-        You can specify --avg to use more checkpoints for model averaging.""",
+        help="It specifies the checkpoint to use for decoding."
+        "Note: Epoch counts from 0.",
     )
 
     parser.add_argument(
@@ -89,7 +87,18 @@ def get_parser():
         default=15,
         help="Number of checkpoints to average. Automatically select "
         "consecutive checkpoints before the checkpoint specified by "
-        "'--epoch' and '--iter'",
+        "'--epoch'. ",
+    )
+
+    parser.add_argument(
+        "--avg-last-n",
+        type=int,
+        default=0,
+        help="""If positive, --epoch and --avg are ignored and it
+        will use the last n checkpoints exp_dir/checkpoint-xxx.pt
+        where xxx is the number of processed batches while
+        saving that checkpoint.
+        """,
     )
 
     parser.add_argument(
@@ -124,16 +133,6 @@ def get_parser():
         "2 means tri-gram",
     )
 
-    parser.add_argument(
-        "--streaming-model",
-        type=str2bool,
-        default=False,
-        help="""Whether to export a streaming model, if the models in exp-dir
-        are streaming model, this should be True.
-        """,
-    )
-
-    add_model_arguments(parser)
     return parser
 
 
@@ -156,9 +155,6 @@ def main():
     # <blk> is defined in local/train_bpe_model.py
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
-
-    if params.streaming_model:
-        assert params.causal_convolution
 
     logging.info(params)
 
