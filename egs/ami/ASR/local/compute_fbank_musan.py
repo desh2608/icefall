@@ -17,19 +17,17 @@
 
 
 """
-This file computes fbank features of the LibriSpeech dataset.
+This file computes fbank features of the musan dataset.
 It looks for manifests in the directory data/manifests.
 
 The generated fbank features are saved in data/fbank.
 """
 
 import logging
-
-# import os
 from pathlib import Path
 
 import torch
-from lhotse import CutSet, Fbank, FbankConfig, LilcomChunkyWriter
+from lhotse import CutSet, LilcomChunkyWriter, combine
 from lhotse.features.kaldifeat import (
     KaldifeatFbank,
     KaldifeatFbankConfig,
@@ -37,8 +35,6 @@ from lhotse.features.kaldifeat import (
     KaldifeatMelOptions,
 )
 from lhotse.recipes.utils import read_manifests_if_cached
-
-# from icefall.utils import get_executor
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -48,33 +44,19 @@ torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
 
-def compute_fbank_librispeech():
+def compute_fbank_musan():
     src_dir = Path("data/manifests")
     output_dir = Path("data/fbank")
-    # num_jobs = min(15, os.cpu_count())
-    num_mel_bins = 80
 
     sampling_rate = 16000
     num_mel_bins = 80
 
-    extractor = KaldifeatFbank(
-        KaldifeatFbankConfig(
-            frame_opts=KaldifeatFrameOptions(sampling_rate=sampling_rate),
-            mel_opts=KaldifeatMelOptions(num_bins=num_mel_bins),
-            device="cuda",
-        )
-    )
-
     dataset_parts = (
-        "dev-clean",
-        "dev-other",
-        "test-clean",
-        "test-other",
-        "train-clean-100",
-        "train-clean-360",
-        "train-other-500",
+        "music",
+        "speech",
+        "noise",
     )
-    prefix = "librispeech"
+    prefix = "musan"
     suffix = "jsonl.gz"
     manifests = read_manifests_if_cached(
         dataset_parts=dataset_parts,
@@ -91,42 +73,40 @@ def compute_fbank_librispeech():
         dataset_parts,
     )
 
-    extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
+    musan_cuts_path = src_dir / "musan_cuts.jsonl.gz"
 
-    # with get_executor() as ex:  # Initialize the executor only once.
-    for partition, m in manifests.items():
-        cuts_filename = f"{prefix}_cuts_{partition}.{suffix}"
-        if (output_dir / cuts_filename).is_file():
-            logging.info(f"{partition} already exists - skipping.")
-            continue
-        logging.info(f"Processing {partition}")
-        cut_set = CutSet.from_manifests(
-            recordings=m["recordings"],
-            supervisions=m["supervisions"],
+    if musan_cuts_path.is_file():
+        logging.info(f"{musan_cuts_path} already exists - skipping")
+        return
+
+    logging.info("Extracting features for Musan")
+
+    extractor = KaldifeatFbank(
+        KaldifeatFbankConfig(
+            frame_opts=KaldifeatFrameOptions(sampling_rate=sampling_rate),
+            mel_opts=KaldifeatMelOptions(num_bins=num_mel_bins),
+            device="cuda",
         )
-        if "train" in partition:
-            cut_set = (
-                cut_set
-                + cut_set.perturb_speed(0.9)
-                + cut_set.perturb_speed(1.1)
+    )
+
+    # create chunks of Musan with duration 5 - 10 seconds
+    _ = (
+        CutSet.from_manifests(
+            recordings=combine(
+                part["recordings"] for part in manifests.values()
             )
-        # cut_set = cut_set.compute_and_store_features(
-        #     extractor=extractor,
-        #     storage_path=f"{output_dir}/{prefix}_feats_{partition}",
-        #     # when an executor is specified, make more partitions
-        #     num_jobs=num_jobs if ex is None else 80,
-        #     executor=ex,
-        #     storage_type=LilcomChunkyWriter,
-        # )
-        cut_set = cut_set.compute_and_store_features_batch(
+        )
+        .cut_into_windows(10.0)
+        .filter(lambda c: c.duration > 5)
+        .compute_and_store_features_batch(
             extractor=extractor,
-            storage_path=f"{output_dir}/{prefix}_feats_{partition}",
-            manifest_path=src_dir / cuts_filename,
-            batch_duration=5000,
+            storage_path=output_dir / "musan_feats",
+            manifest_path=musan_cuts_path,
+            batch_duration=500,
             num_workers=4,
             storage_type=LilcomChunkyWriter,
         )
-        cut_set.to_file(output_dir / cuts_filename)
+    )
 
 
 if __name__ == "__main__":
@@ -135,5 +115,4 @@ if __name__ == "__main__":
     )
 
     logging.basicConfig(format=formatter, level=logging.INFO)
-
-    compute_fbank_librispeech()
+    compute_fbank_musan()

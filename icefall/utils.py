@@ -26,7 +26,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, TextIO, Tuple, Union
+from typing import Callable, Dict, Iterable, List, TextIO, Tuple, Union
 
 import k2
 import k2.version
@@ -35,6 +35,7 @@ import sentencepiece as spm
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from k2.rnnt_loss import _adjust_pruning_lower_bound
 from torch.utils.tensorboard import SummaryWriter
 
 from icefall.checkpoint import average_checkpoints
@@ -660,8 +661,8 @@ def concat(
         ans = k2.ragged.cat([ragged, pad], axis=1)
     else:
         raise ValueError(
-            f'Unsupported direction: {direction}. " \
-            "Expect either "left" or "right"'
+            f'Unsupported direction: {direction}. "             "Expect either'
+            ' "left" or "right"'
         )
     return ans
 
@@ -976,3 +977,94 @@ def display_and_save_batch(
     y = sp.encode(supervisions["text"], out_type=int)
     num_tokens = sum(len(i) for i in y)
     logging.info(f"num tokens: {num_tokens}")
+
+
+def get_prune_ranges(
+    supervisions: List[Dict[str, torch.Tensor]],
+    x_lens: torch.Tensor,
+    y_lens: torch.Tensor,
+    left_buffer: int = 0,
+    right_buffer: int = 0,
+    subsampling_function: Callable[[int], int] = lambda x: x,
+    prune_range: int = 5,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    """
+    Given a batch of supervisions with word-level alignments, obtain frame-level valid
+    ranges that would be used to prune the lattice.
+
+    Args:
+        supervisions:
+            A list of supervisions. Each supervision is a dict.
+        x_lens:
+            A tensor of shape (B,). It represents the length of each sequence
+            in the batch.
+        y_lens:
+            A tensor of shape (B,). It represents the length of each label sequence
+            in the batch.
+        left_buffer:
+            The number of frames to add to the left of the valid range.
+        right_buffer:
+            The number of frames to add to the right of the valid range.
+        subsampling_factor:
+            The subsampling factor of the model.
+        prune_range:
+            The number of tokens to prune to per time frame.
+        device:
+            The device to put the output tensor on.
+    """
+    token_start = supervisions["token_start"]
+    token_end = supervisions["token_end"]
+
+    B = len(token_start)
+    T = subsampling_function(x_lens.max())
+    U = y_lens.max() + 1
+
+    # create a mask of shape (B, T, U) to indicate the valid ranges according to the
+    # supervision
+    valid_mask = torch.zeros(B, T, U, dtype=torch.int32, device=device)
+    for i in range(B):
+        for j, (start, end) in enumerate(zip(token_start[i], token_end[i])):
+            st = max(0, subsampling_function(start - left_buffer))
+            en = min(T, subsampling_function(end + right_buffer))
+            valid_mask[i, st:en, j] = 1
+    valid_mask = valid_mask[
+        ..., : -prune_range + 1
+    ]  # prune the last few tokens
+
+    # create a tensor of shape (B, T) indicating the starting token index for each frame
+    s_begin = valid_mask.argmax(dim=2).to(torch.int32)
+
+    # make s_begin monotonically increasing along the T dimension
+    s_begin = torch.cummax(s_begin, dim=1)[0]
+
+    # The following code is taken from: k2.rnnt_loss.get_rnnt_prune_ranges()
+
+    # Handle the values of s_begin in padding positions.
+    # -1 here means we fill the position of the last frame (before padding) with
+    # padding value which is `len(symbols) - s_range + 1`.
+    # This is to guarantee that we reach the last symbol at last frame (before
+    # padding).
+    # The shape of the mask is (B, T), for example, we have a batch containing
+    # 3 sequences, their lengths are 3, 5, 6 (i.e. B = 3, T = 6), so the mask is
+    # [[True, True, False, False, False, False],
+    #  [True, True, True,  True,  False, False],
+    #  [True, True, True,  True,  True,  False]]
+    mask = torch.arange(0, T, device=device).reshape(1, T).expand(B, T)
+    mask = mask < x_lens[:, None] - 1
+
+    s_begin_padding = y_lens[:, None] - prune_range + 1
+    # handle the cases where `len(symbols) < s_range`
+    s_begin_padding = torch.clamp(s_begin_padding, min=0)
+
+    s_begin = torch.where(mask, s_begin, s_begin_padding)
+
+    # adjusting lower bound to make it satisfy some constraints, see docs in
+    # `_adjust_pruning_lower_bound` for more details of these constraints.
+    s_begin = _adjust_pruning_lower_bound(s_begin, prune_range)
+
+    ranges = s_begin.reshape((B, T, 1)).expand(
+        (B, T, prune_range)
+    ) + torch.arange(prune_range, device=device)
+
+    return ranges
