@@ -46,10 +46,12 @@ class LibriCSSAsrDataModule:
     def add_arguments(cls, parser: argparse.ArgumentParser):
         group = parser.add_argument_group(
             title="ASR data related options",
-            description="These options are used for the preparation of "
-            "PyTorch DataLoaders from Lhotse CutSet's -- they control the "
-            "effective batch sizes, sampling strategies, applied data "
-            "augmentations, etc.",
+            description=(
+                "These options are used for the preparation of "
+                "PyTorch DataLoaders from Lhotse CutSet's -- they control the "
+                "effective batch sizes, sampling strategies, applied data "
+                "augmentations, etc."
+            ),
         )
         group.add_argument(
             "--manifest-dir",
@@ -61,31 +63,52 @@ class LibriCSSAsrDataModule:
             "--max-duration",
             type=int,
             default=200.0,
-            help="Maximum pooled recordings duration (seconds) in a "
-            "single batch. You can reduce it if it causes CUDA OOM.",
+            help=(
+                "Maximum pooled recordings duration (seconds) in a "
+                "single batch. You can reduce it if it causes CUDA OOM."
+            ),
         )
         group.add_argument(
             "--num-buckets",
             type=int,
             default=20,
-            help="The number of buckets for the BucketingSampler"
-            "(you might want to increase it for larger datasets).",
+            help=(
+                "The number of buckets for the BucketingSampler"
+                "(you might want to increase it for larger datasets)."
+            ),
         )
         group.add_argument(
             "--on-the-fly-feats",
             type=str2bool,
             default=False,
-            help="When enabled, use on-the-fly cut mixing and feature "
-            "extraction. Will drop existing precomputed feature manifests "
-            "if available.",
+            help=(
+                "When enabled, use on-the-fly cut mixing and feature "
+                "extraction. Will drop existing precomputed feature manifests "
+                "if available."
+            ),
         )
 
         group.add_argument(
             "--num-workers",
             type=int,
             default=2,
-            help="The number of training dataloader workers that "
-            "collect the batches.",
+            help=(
+                "The number of training dataloader workers that "
+                "collect the batches."
+            ),
+        )
+
+        group.add_argument(
+            "--rttm-affix",
+            type=str,
+            default="",
+            help="The affix of RTTM file name, e.g. `_spectral`.",
+        )
+        group.add_argument(
+            "--gss-affix",
+            type=str,
+            default="",
+            help="GSS affix to distinguish different enhanced manifests.",
         )
 
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
@@ -112,11 +135,43 @@ class LibriCSSAsrDataModule:
         return test_dl
 
     @lru_cache()
-    def dev_cuts(self) -> CutSet:
-        logging.info("About to get GSS-enhanced dev cuts")
-        return load_manifest(self.args.manifest_dir / "cuts_dev_enh.jsonl.gz")
+    def dev_ihm_cuts(self) -> CutSet:
+        logging.info("About to get IHM (clean) dev cuts")
+        return load_manifest(self.args.manifest_dir / "cuts_dev_ihm.jsonl.gz")
 
     @lru_cache()
-    def test_cuts(self) -> CutSet:
+    def dev_sdm_cuts(self) -> CutSet:
+        logging.info("About to get SDM dev cuts")
+        return load_manifest(
+            self.args.manifest_dir
+            / f"cuts_dev_sdm{self.args.rttm_affix}.jsonl.gz"
+        )
+
+    @lru_cache()
+    def dev_gss_cuts(self) -> CutSet:
+        logging.info("About to get GSS-enhanced dev cuts")
+        return load_manifest(
+            self.args.manifest_dir
+            / f"cuts_dev_gss{self.args.rttm_affix}{self.args.gss_affix}.jsonl.gz"
+        )
+
+    @lru_cache()
+    def test_ihm_cuts(self) -> CutSet:
+        logging.info("About to get IHM (clean) test cuts")
+        return load_manifest(self.args.manifest_dir / "cuts_test_ihm.jsonl.gz")
+
+    @lru_cache()
+    def test_sdm_cuts(self) -> CutSet:
+        logging.info("About to get SDM test cuts")
+        return load_manifest(
+            self.args.manifest_dir
+            / f"cuts_test_sdm{self.args.rttm_affix}.jsonl.gz"
+        )
+
+    @lru_cache()
+    def test_gss_cuts(self) -> CutSet:
         logging.info("About to get GSS-enhanced test cuts")
-        return load_manifest(self.args.manifest_dir / "cuts_test_enh.jsonl.gz")
+        return load_manifest(
+            self.args.manifest_dir
+            / f"cuts_test_gss{self.args.rttm_affix}{self.args.gss_affix}.jsonl.gz"
+        )
