@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
 import json
+from cytoolz.itertoolz import groupby
 
 from lhotse import load_manifest, SupervisionSet
 from kaldialign import edit_distance
@@ -24,13 +25,20 @@ def get_args():
 
     parser = argparse.ArgumentParser(description="Compute cpWER.")
     parser.add_argument(
-        "--ref", type=Path, required=True, help="Path to reference cuts file."
+        "ref",
+        type=Path,
+        help="Path to reference supervision segments.",
     )
     parser.add_argument(
-        "--hyp", type=Path, required=True, help="Path to decoded segments."
+        "hyp",
+        type=Path,
+        help="Path to decoded supervision segments.",
     )
     parser.add_argument(
-        "--stats-file", type=Path, required=True, help="Path to output stats file."
+        "--stats-file",
+        type=Path,
+        required=True,
+        help="Path to output stats file.",
     )
     return parser.parse_args()
 
@@ -44,10 +52,11 @@ def concat_text(segments):
     speakers = set(s.speaker for s in segments)
     text = []
     for speaker in speakers:
-        speaker_segs = segments.filter(lambda s: s.speaker == speaker)
+        speaker_segs = list(filter(lambda s: s.speaker == speaker, segments))
         text.append(
             " ".join(
-                s.text.strip() for s in sorted(speaker_segs, key=lambda s: s.start)
+                s.text.strip() if s.text is not None else ""
+                for s in sorted(speaker_segs, key=lambda s: s.start)
             )
         )
     return text
@@ -95,26 +104,27 @@ def compute_cpWER(ref_text, hyp_text):
 
 
 def main(ref, hyp, stats_file):
-    ref_cuts = load_manifest(ref)
+    ref_segs = load_manifest(ref)
     hyp_segs = load_manifest(hyp)
+
+    hyp_segs_by_recording = groupby(
+        lambda s: s.recording_id, sorted(hyp_segs, key=lambda s: s.recording_id)
+    )
 
     wer_dict = {}
     # Each cut in the reference corresponds to a recording, so we iterate over all the
     # cuts (i.e. recordings)
-    for ref_cut in ref_cuts:
-        reco_id = ref_cut.recording_id
+    for reco_id, reco_hyps in hyp_segs_by_recording.items():
 
-        # Get hypothesis segments for this recording
-        segs = hyp_segs.filter(lambda s: s.recording_id == reco_id)
-
-        # Get reference text
-        ref_text = concat_text(SupervisionSet.from_segments(ref_cut.supervisions))
+        ref_text = concat_text(
+            ref_segs.filter(lambda s: s.recording_id == reco_id)
+        )
 
         if len(ref_text) == 0:
-            logging.warning("Empty reference for cut {}".format(ref_cut.id))
+            logging.warning(f"Empty reference for {reco_id}")
 
         # Get hypothesis text
-        hyp_text = concat_text(segs)
+        hyp_text = concat_text(reco_hyps)
 
         # Compute cpWER
         stats = compute_cpWER(ref_text, hyp_text)

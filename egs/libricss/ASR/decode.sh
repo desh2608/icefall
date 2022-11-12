@@ -4,7 +4,9 @@
 set -euo pipefail
 
 stage=0
-rttm_tag="oracle"
+stop_stage=100
+rttm_affix=""
+gss_affix=""    # can be used to distinguish between different GSS outputs
 
 . ./path.sh
 . shared/parse_options.sh
@@ -13,8 +15,14 @@ rttm_tag="oracle"
 # and then compute the cpWER.
 test_sets="dev test"
 
-mkdir -p pruned_transducer_stateless2/exp/libricss_${rttm_tag}
-cp pruned_transducer_stateless2/exp/libricss_oracle/epoch-25.pt pruned_transducer_stateless2/exp/libricss_${rttm_tag}/epoch-25.pt
+# Append _ to affixes if not empty
+rttm_affix=${rttm_affix:+_$rttm_affix}
+gss_affix=${gss_affix:+_$gss_affix}
+
+EXP_DIR=pruned_transducer_stateless2/exp/libricss${rttm_affix}${gss_affix}
+
+mkdir -p $EXP_DIR
+cp pruned_transducer_stateless2/exp/epoch-25.pt $EXP_DIR/epoch-25.pt
 
 log() {
   # This function is from espnet
@@ -22,15 +30,17 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-log "Decoding LibriCSS ${rttm_tag} enhanced data"
+log "Decoding LibriCSS data"
 
-if [ $stage -le 0 ]; then
+if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   log "Stage 0: Decoding..."
-  utils/queue-ackgpu.pl --mem 4G --gpu 1 --config conf/gpu.conf pruned_transducer_stateless2/exp/libricss_${rttm_tag}/decode.log \
+  utils/queue-ackgpu.pl --mem 4G --gpu 1 --config conf/gpu.conf $EXP_DIR/decode.log \
     python ./pruned_transducer_stateless2/decode.py \
-      --manifest-dir data/manifests/libricss_${rttm_tag} \
+      --manifest-dir data/manifests \
+      --rttm-affix "$rttm_affix" \
+      --gss-affix "$gss_affix" \
       --epoch 25 \
-      --exp-dir ./pruned_transducer_stateless2/exp/libricss_${rttm_tag} \
+      --exp-dir $EXP_DIR \
       --max-duration 500 \
       --decoding-method fast_beam_search \
       --beam-size 4 \
@@ -38,13 +48,15 @@ if [ $stage -le 0 ]; then
       --max-states 8
 fi
 
-if [ $stage -le 1 ]; then
-  exp_dir="./pruned_transducer_stateless2/exp/libricss_${rttm_tag}/fast_beam_search/"
-  for part in dev test; do
-    log "Stage 1: Computing cpWER for ${part} set"
-    recog_path="${exp_dir}/recogs-${part}-beam_4_max_contexts_4_max_states_8-epoch-25-beam-4-max-contexts-4-max-states-8.txt"
-    cat $recog_path | python local/convert_output_to_supervision.py - ${exp_dir}/${part}_hyp.jsonl.gz 
-    python local/compute_cpwer.py --ref data/manifests/libricss_${rttm_tag}/raw_cuts_${part}_orig.jsonl \
-      --hyp ${exp_dir}/${part}_hyp.jsonl.gz --stats-file ${exp_dir}/${part}_cpwer_stats.txt
+if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
+  decode_dir=${EXP_DIR}/fast_beam_search
+  for split in dev test; do
+    ref_file=data/manifests/libricss-sdm_supervisions_all.jsonl.gz
+    for part in ihm sdm gss; do
+      log "Stage 1: Computing cpWER for ${part}_${split} set"
+      hyp_file="${decode_dir}/${split}_${part}-beam_4_max_contexts_4_max_states_8-hyps.jsonl.gz"
+      python local/compute_cpwer.py ${ref_file} ${hyp_file} \
+        --stats-file ${decode_dir}/${split}_${part}_cpwer_stats.txt
+    done
   done
 fi

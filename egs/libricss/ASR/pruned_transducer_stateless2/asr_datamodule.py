@@ -24,10 +24,9 @@ from pathlib import Path
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest
 from lhotse.dataset import (
     BucketingSampler,
-    K2SpeechRecognitionDataset,
+    UnsupervisedDataset,
     PrecomputedFeatures,
 )
-from lhotse.dataset.input_strategies import OnTheFlyFeatures
 from torch.utils.data import DataLoader
 
 from icefall.utils import str2bool
@@ -113,12 +112,7 @@ class LibriCSSAsrDataModule:
 
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = K2SpeechRecognitionDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
-            if self.args.on_the_fly_feats
-            else PrecomputedFeatures(),
-            return_cuts=True,
-        )
+        test = UnsupervisedDataset()
         sampler = BucketingSampler(
             cuts,
             num_buckets=self.args.num_buckets,

@@ -21,7 +21,7 @@ gss_affix=""    # can be used to distinguish between different GSS outputs
 # download from the following link: 
 # https://huggingface.co/pkufool/icefall_librispeech_streaming_pruned_transducer_stateless2_20220625/tree/main
 # - data/lang_bpe_500
-# pruned_transducer_stateless2/exp/libricss_oracle/epoch-25.pt (pretrained-epoch-24-avg-10.pt)
+# - pruned_transducer_stateless2/exp/epoch-25.pt (pretrained-epoch-24-avg-10.pt)
 #
 # This script requires the `gss` package to be installed (https://github.com/desh2608/gss)
 #

@@ -79,6 +79,10 @@ from decoder import Decoder
 from joiner import Joiner
 from model import Transducer
 
+from lhotse import CutSet, SupervisionSegment, SupervisionSet
+from lhotse.cut import Cut
+from lhotse.utils import fastcopy
+
 from icefall.checkpoint import load_checkpoint
 from icefall.env import get_env_info
 
@@ -167,7 +171,9 @@ def get_parser():
         "--context-size",
         type=int,
         default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
+        help=(
+            "The context size in the decoder. 1 means bigram; 2 means tri-gram"
+        ),
     )
     parser.add_argument(
         "--max-sym-per-frame",
@@ -340,16 +346,15 @@ def decode_one_batch(
       the returned dict.
     """
     device = model.device
-    feature = batch["inputs"]
+    feature = batch["features"].to(device)
+    feature_lens = batch["features_lens"].to(device)
     assert feature.ndim == 3
 
-    feature = feature.to(device)
     # at entry, feature is (N, T, C)
 
-    supervisions = batch["supervisions"]
-    feature_lens = supervisions["num_frames"].to(device)
-
-    encoder_out, encoder_out_lens = model.encoder(x=feature, x_lens=feature_lens)
+    encoder_out, encoder_out_lens = model.encoder(
+        x=feature, x_lens=feature_lens
+    )
     hyps = []
 
     if params.decoding_method == "fast_beam_search":
@@ -364,7 +369,10 @@ def decode_one_batch(
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
-    elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
+    elif (
+        params.decoding_method == "greedy_search"
+        and params.max_sym_per_frame == 1
+    ):
         hyp_tokens = greedy_search_batch(
             model=model,
             encoder_out=encoder_out,
@@ -410,11 +418,7 @@ def decode_one_batch(
         return {"greedy_search": hyps}
     elif params.decoding_method == "fast_beam_search":
         return {
-            (
-                f"beam_{params.beam}_"
-                f"max_contexts_{params.max_contexts}_"
-                f"max_states_{params.max_states}"
-            ): hyps
+            f"beam_{params.beam}_max_contexts_{params.max_contexts}_max_states_{params.max_states}": hyps
         }
     else:
         return {f"beam_size_{params.beam_size}": hyps}
@@ -469,7 +473,7 @@ def decode_dataset(
             batch=batch,
         )
 
-        cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
+        cut_ids = [cut.id for cut in batch["cuts"]]
 
         for name, hyps in hyps_dict.items():
             this_batch = []
@@ -485,24 +489,68 @@ def decode_dataset(
         if batch_idx % log_interval == 0:
             batch_str = f"{batch_idx}/{num_batches}"
 
-            logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
+            logging.info(
+                f"batch {batch_str}, cuts processed until now is {num_cuts}"
+            )
     return results
 
 
 def save_results(
+    cuts: CutSet,
     params: AttributeDict,
     test_set_name: str,
     results_dict: Dict[str, List[Tuple[str, List[int]]]],
 ):
-    test_set_wers = dict()
     for key, results in results_dict.items():
         recog_path = (
             params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
         )
+        out_sups = []
         with recog_path.open("w") as f:
             for cut_id, hyp_words in results:
                 f.write(f"{cut_id}\t{hyp_words}\n")
+                old_cut = cuts[cut_id]
+                new_sup = create_new_supervision(old_cut, hyp_words)
+                out_sups.append(new_sup)
+        out_sups = SupervisionSet.from_segments(out_sups)
+        out_sups.to_file(
+            params.res_dir / f"{test_set_name}-{key}-hyps.jsonl.gz"
+        )
         logging.info(f"The transcripts are stored in {recog_path}")
+
+
+def create_new_supervision(cut: Cut, hyp: str) -> SupervisionSegment:
+    """Create a new supervision segment with the given hyp.
+
+    Args:
+      cut:
+        The original cut.
+      hyp:
+        The hypothesis.
+    Returns:
+      Return a new supervision segment with the given hyp.
+    """
+    if len(cut.supervisions) == 0:
+        # We will have to extract speaker, start and duration from the cut id.
+        # The cut id is like this: OV10_session0-260-031489_031768-235
+        reco_id, spk, start_end, *_ = cut.id.split("-")
+        start, end = start_end.split("_")
+        start = float(start) / 100
+        end = float(end) / 100
+        duration = end - start
+        supervision = SupervisionSegment(
+            id=cut.id,
+            recording_id=reco_id,
+            start=start,
+            duration=duration,
+            channel=0,
+            language="English",
+            speaker=spk,
+            text=hyp,
+        )
+    else:
+        supervision = fastcopy(cut.supervisions[0], text=hyp, start=cut.start)
+    return supervision
 
 
 @torch.no_grad()
@@ -530,7 +578,9 @@ def main():
         params.suffix += f"-max-contexts-{params.max_contexts}"
         params.suffix += f"-max-states-{params.max_states}"
     elif "beam_search" in params.decoding_method:
-        params.suffix += f"-{params.decoding_method}-beam-size-{params.beam_size}"
+        params.suffix += (
+            f"-{params.decoding_method}-beam-size-{params.beam_size}"
+        )
     else:
         params.suffix += f"-context-{params.context_size}"
         params.suffix += f"-max-sym-per-frame-{params.max_sym_per_frame}"
@@ -573,16 +623,47 @@ def main():
 
     libricss = LibriCSSAsrDataModule(args)
 
-    dev_cuts = libricss.dev_cuts()
-    test_cuts = libricss.test_cuts()
+    dev_ihm_cuts = libricss.dev_ihm_cuts()
+    test_ihm_cuts = libricss.test_ihm_cuts()
+    dev_sdm_cuts = libricss.dev_sdm_cuts()
+    test_sdm_cuts = libricss.test_sdm_cuts()
+    dev_gss_cuts = libricss.dev_gss_cuts()
+    test_gss_cuts = libricss.test_gss_cuts()
 
-    dev_dl = libricss.test_dataloaders(dev_cuts)
-    test_dl = libricss.test_dataloaders(test_cuts)
+    dev_ihm_dl = libricss.test_dataloaders(dev_ihm_cuts)
+    test_ihm_dl = libricss.test_dataloaders(test_ihm_cuts)
+    dev_sdm_dl = libricss.test_dataloaders(dev_sdm_cuts)
+    test_sdm_dl = libricss.test_dataloaders(test_sdm_cuts)
+    dev_gss_dl = libricss.test_dataloaders(dev_gss_cuts)
+    test_gss_dl = libricss.test_dataloaders(test_gss_cuts)
 
-    test_sets = ["dev", "test"]
-    test_dls = [dev_dl, test_dl]
+    test_sets = [
+        "dev_ihm",
+        "test_ihm",
+        "dev_sdm",
+        "test_sdm",
+        "dev_gss",
+        "test_gss",
+    ]
+    test_dls = [
+        dev_ihm_dl,
+        test_ihm_dl,
+        dev_sdm_dl,
+        test_sdm_dl,
+        dev_gss_dl,
+        test_gss_dl,
+    ]
+    test_cuts = [
+        dev_ihm_cuts,
+        test_ihm_cuts,
+        dev_sdm_cuts,
+        test_sdm_cuts,
+        dev_gss_cuts,
+        test_gss_cuts,
+    ]
 
-    for ts, td in zip(test_sets, test_dls):
+    for ts, td, tc in zip(test_sets, test_dls, test_cuts):
+        logging.info(f"Decoding {ts}")
         results_dict = decode_dataset(
             dl=td,
             params=params,
@@ -592,6 +673,7 @@ def main():
         )
 
         save_results(
+            cuts=tc,
             params=params,
             test_set_name=ts,
             results_dict=results_dict,
