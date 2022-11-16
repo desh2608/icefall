@@ -142,15 +142,28 @@ def main(ref, hyp, stats_file):
     avg_sub = total_sub / total_num_words
     avg_cpwer = (total_ins + total_del + total_sub) / total_num_words
 
+    wer_dict["TOTAL"] = {
+        "ref_text": [],
+        "hyp_text": [],
+        "count": total_num_words,
+        "num_ins": total_ins,
+        "num_del": total_del,
+        "num_sub": total_sub,
+        "ins": avg_ins,
+        "del": avg_del,
+        "sub": avg_sub,
+        "cpwer": avg_cpwer,
+    }
+
     # Write results to file
     with stats_file.open("w") as f:
         json.dump(wer_dict, f, indent=2)
 
     # Print averages
-    print(f"Average cpWER: {avg_cpwer:.2%}")
     print(f"Average insertion rate: {avg_ins:.2%}")
     print(f"Average deletion rate: {avg_del:.2%}")
     print(f"Average substitution rate: {avg_sub:.2%}")
+    print(f"Average cpWER: {avg_cpwer:.2%}")
 
 
 if __name__ == "__main__":
