@@ -37,12 +37,12 @@ of far-field array microphones, but this is optional (see `prepare.sh` for detai
 
 ### pruned_transducer_stateless7
 
-The following are decoded using `modified_beam_search`:
+The following are decoded using `modified_beam_search` :
 
 | Evaluation set           | dev WER    | test WER |
 |--------------------------|------------|---------|
-| IHM                      |  19.23  | 18.06 |
-| SDM                      |  31.16  | 32.61 |
-| MDM (GSS-enhanced)       |  22.08  | 23.03 |
+| IHM                      |  18.92  | 17.40 |
+| SDM                      |  31.25  | 32.21 |
+| MDM (GSS-enhanced)       |  21.67  | 22.43 |
 
 See [RESULTS](/egs/ami/ASR/RESULTS.md) for details.
