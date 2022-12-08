@@ -125,10 +125,10 @@ def compute_fbank_ami(args):
         data_dir=data_dir,
         dataset_parts=args.dataset_parts,
         prefix=f"ami-{args.mic}",
-        supervision_suffix=args.rttm_affix,
+        supervision_suffix=f"{args.rttm_affix}{args.gss_affix}",
     )
 
-    for partition in ["dev", "test"]:
+    for partition in args.dataset_parts:
         logging.info(f"Processing {partition}")
         if args.mic == "gss":
             cut_set = manifests[partition]["cuts"]

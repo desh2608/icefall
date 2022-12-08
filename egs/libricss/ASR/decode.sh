@@ -19,11 +19,12 @@ test_sets="dev test"
 rttm_affix=${rttm_affix:+_$rttm_affix}
 gss_affix=${gss_affix:+_$gss_affix}
 
-EXP_DIR=pruned_transducer_stateless7/exp/libricss${rttm_affix}${gss_affix}
+EXP_DIR=pruned_transducer_stateless2/exp/libricss${rttm_affix}${gss_affix}
 
 mkdir -p $EXP_DIR
-# cp pruned_transducer_stateless2/exp/epoch-25.pt $EXP_DIR/epoch-25.pt
-cp pruned_transducer_stateless7/exp/epoch-30.pt $EXP_DIR/epoch-30.pt
+if [ ! -f $EXP_DIR/epoch-25.pt ]; then
+  cp pruned_transducer_stateless2/exp/epoch-25.pt $EXP_DIR/epoch-25.pt
+fi
 
 log() {
   # This function is from espnet
@@ -36,11 +37,11 @@ log "Decoding LibriCSS data"
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   log "Stage 0: Decoding..."
   utils/queue-ackgpu.pl --mem 4G --gpu 1 --config conf/gpu.conf $EXP_DIR/decode.log \
-    python ./pruned_transducer_stateless7/decode.py \
+    python ./pruned_transducer_stateless2/decode.py \
       --manifest-dir data/manifests \
       --rttm-affix "$rttm_affix" \
       --gss-affix "$gss_affix" \
-      --epoch 30 \
+      --epoch 25 \
       --exp-dir $EXP_DIR \
       --max-duration 500 \
       --decoding-method fast_beam_search \

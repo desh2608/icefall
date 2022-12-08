@@ -26,25 +26,25 @@ import argparse
 import logging
 from collections import defaultdict
 from pathlib import Path
-from tqdm import tqdm
-from typing import Optional, Sequence, Iterable, Dict, Union
+from typing import Dict, Iterable, Optional, Sequence, Union
 
 import torch
 from lhotse import (
     CutSet,
-    load_manifest,
     LilcomChunkyWriter,
     RecordingSet,
     SupervisionSet,
+    load_manifest,
 )
 from lhotse.features.kaldifeat import (
     KaldifeatFbank,
     KaldifeatFbankConfig,
-    KaldifeatMelOptions,
     KaldifeatFrameOptions,
+    KaldifeatMelOptions,
 )
 from lhotse.manipulation import combine
 from lhotse.utils import Pathlike
+from tqdm import tqdm
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -74,9 +74,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default="data/manifests")
     parser.add_argument("--output-dir", type=Path, default="data/fbank")
-    parser.add_argument(
-        "--mic", type=str, default="ihm", choices=["ihm", "sdm", "gss"]
-    )
+    parser.add_argument("--mic", type=str, default="ihm", choices=["ihm", "sdm", "gss"])
     parser.add_argument(
         "--rttm-affix",
         type=str,
@@ -107,10 +105,7 @@ def read_manifests(
         if manifest == "recordings":
             path = data_dir / f"{prefix}{manifest}_all.jsonl.gz"
         else:
-            path = (
-                data_dir
-                / f"{prefix}{manifest}_all{supervision_suffix}.jsonl.gz"
-            )
+            path = data_dir / f"{prefix}{manifest}_all{supervision_suffix}.jsonl.gz"
         if not path.is_file():
             continue
         m = load_manifest(path)
@@ -144,7 +139,7 @@ def compute_fbank_libricss(args):
     manifests = read_manifests(
         data_dir=data_dir,
         prefix=f"libricss-{args.mic}",
-        supervision_suffix=args.rttm_affix,
+        supervision_suffix=f"{args.rttm_affix}{args.gss_affix}",
     )
 
     for partition in ["dev", "test"]:
@@ -154,9 +149,7 @@ def compute_fbank_libricss(args):
         else:
             cut_set = CutSet.from_manifests(
                 **manifests[partition]
-            ).trim_to_supervisions(
-                keep_overlapping=False, keep_all_channels=False
-            )
+            ).trim_to_supervisions(keep_overlapping=False, keep_all_channels=False)
 
         storage_path = (
             output_dir
@@ -178,9 +171,7 @@ def compute_fbank_libricss(args):
 
 
 if __name__ == "__main__":
-    formatter = (
-        "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-    )
+    formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
 
     logging.basicConfig(format=formatter, level=logging.INFO)
 

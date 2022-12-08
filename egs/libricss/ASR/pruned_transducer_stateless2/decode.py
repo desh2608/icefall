@@ -77,19 +77,14 @@ from beam_search import (
 from conformer import Conformer
 from decoder import Decoder
 from joiner import Joiner
-from model import Transducer
-
 from lhotse import CutSet, SupervisionSegment, SupervisionSet
 from lhotse.cut import Cut
 from lhotse.utils import fastcopy
+from model import Transducer
 
 from icefall.checkpoint import load_checkpoint
 from icefall.env import get_env_info
-
-from icefall.utils import (
-    AttributeDict,
-    setup_logger,
-)
+from icefall.utils import AttributeDict, setup_logger
 
 
 def get_parser():
@@ -171,9 +166,7 @@ def get_parser():
         "--context-size",
         type=int,
         default=2,
-        help=(
-            "The context size in the decoder. 1 means bigram; 2 means tri-gram"
-        ),
+        help=("The context size in the decoder. 1 means bigram; 2 means tri-gram"),
     )
     parser.add_argument(
         "--max-sym-per-frame",
@@ -352,9 +345,7 @@ def decode_one_batch(
 
     # at entry, feature is (N, T, C)
 
-    encoder_out, encoder_out_lens = model.encoder(
-        x=feature, x_lens=feature_lens
-    )
+    encoder_out, encoder_out_lens = model.encoder(x=feature, x_lens=feature_lens)
     hyps = []
 
     if params.decoding_method == "fast_beam_search":
@@ -369,10 +360,7 @@ def decode_one_batch(
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
-    elif (
-        params.decoding_method == "greedy_search"
-        and params.max_sym_per_frame == 1
-    ):
+    elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         hyp_tokens = greedy_search_batch(
             model=model,
             encoder_out=encoder_out,
@@ -489,9 +477,7 @@ def decode_dataset(
         if batch_idx % log_interval == 0:
             batch_str = f"{batch_idx}/{num_batches}"
 
-            logging.info(
-                f"batch {batch_str}, cuts processed until now is {num_cuts}"
-            )
+            logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
     return results
 
 
@@ -513,9 +499,7 @@ def save_results(
                 new_sup = create_new_supervision(old_cut, hyp_words)
                 out_sups.append(new_sup)
         out_sups = SupervisionSet.from_segments(out_sups)
-        out_sups.to_file(
-            params.res_dir / f"{test_set_name}-{key}-hyps.jsonl.gz"
-        )
+        out_sups.to_file(params.res_dir / f"{test_set_name}-{key}-hyps.jsonl.gz")
         logging.info(f"The transcripts are stored in {recog_path}")
 
 
@@ -578,9 +562,7 @@ def main():
         params.suffix += f"-max-contexts-{params.max_contexts}"
         params.suffix += f"-max-states-{params.max_states}"
     elif "beam_search" in params.decoding_method:
-        params.suffix += (
-            f"-{params.decoding_method}-beam-size-{params.beam_size}"
-        )
+        params.suffix += f"-{params.decoding_method}-beam-size-{params.beam_size}"
     else:
         params.suffix += f"-context-{params.context_size}"
         params.suffix += f"-max-sym-per-frame-{params.max_sym_per_frame}"

@@ -83,7 +83,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   # We assume that you have downloaded the LibriCSS corpus
   # to $dl_dir/LibriCSS
   for mic in ihm sdm mdm; do
-    lhotse prepare ami --mic $mic $dl_dir/amicorpus data/manifests/
+    lhotse prepare ami --mic $mic --normalize-text kaldi $dl_dir/amicorpus data/manifests/
   done
 fi
 
@@ -130,24 +130,26 @@ fi
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
   echo "Stage 6: Enhance segments using GSS"
   for part in dev test; do
+    mkdir -p $gss_exp_dir/$part/cuts${gss_affix}
+
     $cmd JOB=1:$nj_gss $gss_exp_dir/$part/log/enhance.JOB.log \
         gss enhance cuts \
           $gss_exp_dir/$part/cuts.jsonl.gz $gss_exp_dir/$part/split$nj_gss/cuts_per_segment.JOB.jsonl.gz \
           $gss_exp_dir/$part/enhanced${gss_affix} \
-          --use-garbage-class \
           --channels 0,1,2,3,4,5,6,7 \
+          --use-garbage-class \
           --bss-iterations 10 \
-          --context-duration 15.0 \
-          --min-segment-length 0.1 \
+          --context-duration 20.0 \
+          --min-segment-length 0.05 \
           --max-segment-length 15.0 \
-          --max-batch-duration 15.0 \
+          --max-batch-duration 20.0 \
           --max-batch-cuts 3 \
           --num-buckets 3 \
-          --enhanced-manifest $gss_exp_dir/$part/cuts${gss_affix}.JOB.jsonl.gz \
-          --force-overwrite
+          --enhanced-manifest $gss_exp_dir/$part/cuts${gss_affix}/cuts.JOB.jsonl.gz \
+          --force-overwrite || exit 1
 
     # Merge the enhanced cuts
-    lhotse combine $gss_exp_dir/$part/cuts${gss_affix}.*.jsonl.gz data/manifests/ami-gss_cuts_${part}${rttm_affix}${gss_affix}.jsonl.gz
+    lhotse combine $gss_exp_dir/$part/cuts${gss_affix}/cuts.*.jsonl.gz data/manifests/ami-gss_cuts_${part}${rttm_affix}${gss_affix}.jsonl.gz
   done
 fi
 
@@ -166,7 +168,7 @@ fi
 
 if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
   log "Stage 9: Compute fbank features for AMI MDM data enhanced with GSS"
-  python local/compute_fbank_ami.py --mic gss --data-dir data/manifests \
+  $cmd exp/feats.log python local/compute_fbank_ami.py --mic gss --data-dir data/manifests \
     --output-dir data/fbank --rttm-affix "$rttm_affix" --gss-affix "$gss_affix" \
     --dataset-parts dev test
 fi

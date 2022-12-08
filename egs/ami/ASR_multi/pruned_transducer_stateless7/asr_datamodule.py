@@ -134,11 +134,6 @@ class AmiAsrDataModule:
         return test_dl
 
     @lru_cache()
-    def dev_ihm_cuts(self) -> CutSet:
-        logging.info("About to get IHM (clean) dev cuts")
-        return load_manifest(self.args.manifest_dir / "cuts_dev_ihm.jsonl.gz")
-
-    @lru_cache()
     def dev_sdm_cuts(self) -> CutSet:
         logging.info("About to get SDM dev cuts")
         return load_manifest(
@@ -152,11 +147,6 @@ class AmiAsrDataModule:
             self.args.manifest_dir
             / f"cuts_dev_gss{self.args.rttm_affix}{self.args.gss_affix}.jsonl.gz"
         )
-
-    @lru_cache()
-    def test_ihm_cuts(self) -> CutSet:
-        logging.info("About to get IHM (clean) test cuts")
-        return load_manifest(self.args.manifest_dir / "cuts_test_ihm.jsonl.gz")
 
     @lru_cache()
     def test_sdm_cuts(self) -> CutSet:

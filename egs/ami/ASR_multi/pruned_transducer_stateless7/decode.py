@@ -690,39 +690,29 @@ def main():
 
     ami = AmiAsrDataModule(args)
 
-    dev_ihm_cuts = ami.dev_ihm_cuts()
-    test_ihm_cuts = ami.test_ihm_cuts()
     dev_sdm_cuts = ami.dev_sdm_cuts()
     test_sdm_cuts = ami.test_sdm_cuts()
     dev_gss_cuts = ami.dev_gss_cuts()
     test_gss_cuts = ami.test_gss_cuts()
 
-    dev_ihm_dl = ami.test_dataloaders(dev_ihm_cuts)
-    test_ihm_dl = ami.test_dataloaders(test_ihm_cuts)
     dev_sdm_dl = ami.test_dataloaders(dev_sdm_cuts)
     test_sdm_dl = ami.test_dataloaders(test_sdm_cuts)
     dev_gss_dl = ami.test_dataloaders(dev_gss_cuts)
     test_gss_dl = ami.test_dataloaders(test_gss_cuts)
 
     test_sets = [
-        # "dev_ihm",
-        # "test_ihm",
         "dev_sdm",
         "test_sdm",
         "dev_gss",
         "test_gss",
     ]
     test_dls = [
-        # dev_ihm_dl,
-        # test_ihm_dl,
         dev_sdm_dl,
         test_sdm_dl,
         dev_gss_dl,
         test_gss_dl,
     ]
     test_cuts = [
-        # dev_ihm_cuts,
-        # test_ihm_cuts,
         dev_sdm_cuts,
         test_sdm_cuts,
         dev_gss_cuts,
