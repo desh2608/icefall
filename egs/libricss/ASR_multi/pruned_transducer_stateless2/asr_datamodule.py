@@ -22,11 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest
-from lhotse.dataset import (
-    BucketingSampler,
-    UnsupervisedDataset,
-    PrecomputedFeatures,
-)
+from lhotse.dataset import BucketingSampler, PrecomputedFeatures, UnsupervisedDataset
 from torch.utils.data import DataLoader
 
 from icefall.utils import str2bool
@@ -92,8 +88,7 @@ class LibriCSSAsrDataModule:
             type=int,
             default=2,
             help=(
-                "The number of training dataloader workers that "
-                "collect the batches."
+                "The number of training dataloader workers that " "collect the batches."
             ),
         )
 
@@ -137,8 +132,7 @@ class LibriCSSAsrDataModule:
     def dev_sdm_cuts(self) -> CutSet:
         logging.info("About to get SDM dev cuts")
         return load_manifest(
-            self.args.manifest_dir
-            / f"cuts_dev_sdm{self.args.rttm_affix}.jsonl.gz"
+            self.args.manifest_dir / f"cuts_dev_sdm{self.args.rttm_affix}.jsonl.gz"
         )
 
     @lru_cache()
@@ -158,8 +152,7 @@ class LibriCSSAsrDataModule:
     def test_sdm_cuts(self) -> CutSet:
         logging.info("About to get SDM test cuts")
         return load_manifest(
-            self.args.manifest_dir
-            / f"cuts_test_sdm{self.args.rttm_affix}.jsonl.gz"
+            self.args.manifest_dir / f"cuts_test_sdm{self.args.rttm_affix}.jsonl.gz"
         )
 
     @lru_cache()

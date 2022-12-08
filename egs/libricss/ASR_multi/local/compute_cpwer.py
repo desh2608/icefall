@@ -1,17 +1,14 @@
 #!/usr/local/bin/python
 # -*- coding: utf-8 -*-
-from pathlib import Path
 import json
-from cytoolz.itertoolz import groupby
-
-from lhotse import load_manifest, SupervisionSet
-from kaldialign import edit_distance
+import logging
+from pathlib import Path
 
 import numpy as np
+from cytoolz.itertoolz import groupby
+from kaldialign import edit_distance
+from lhotse import SupervisionSet, load_manifest
 from scipy.optimize import linear_sum_assignment
-
-import logging
-
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -116,9 +113,7 @@ def main(ref, hyp, stats_file):
     # cuts (i.e. recordings)
     for reco_id, reco_hyps in hyp_segs_by_recording.items():
 
-        ref_text = concat_text(
-            ref_segs.filter(lambda s: s.recording_id == reco_id)
-        )
+        ref_text = concat_text(ref_segs.filter(lambda s: s.recording_id == reco_id))
 
         if len(ref_text) == 0:
             logging.warning(f"Empty reference for {reco_id}")
