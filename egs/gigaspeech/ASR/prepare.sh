@@ -38,6 +38,7 @@ num_per_split=50
 #     - noise
 #     - speech
 dl_dir=$PWD/download
+cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
 
 . shared/parse_options.sh || exit 1
 
@@ -140,7 +141,7 @@ fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   log "Stage 4: Compute features for DEV and TEST subsets of GigaSpeech (may take 2 minutes)"
-  python3 ./local/compute_fbank_gigaspeech_dev_test.py
+  $cmd exp/feats_dev_test.log python ./local/compute_fbank_gigaspeech_dev_test.py
 fi
 
 if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then

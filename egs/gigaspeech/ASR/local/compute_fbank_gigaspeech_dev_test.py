@@ -28,10 +28,12 @@ from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
 # even when we are not invoking the main (e.g. when spawning subprocesses).
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def compute_fbank_gigaspeech_dev_test():
-    in_out_dir = Path("data/fbank")
+    manifest_dir = Path("data/manifests")
+    feats_dir = Path("data/fbank")
     # number of workers in dataloader
     num_workers = 20
 
@@ -48,12 +50,13 @@ def compute_fbank_gigaspeech_dev_test():
     logging.info(f"device: {device}")
 
     for partition in subsets:
-        cuts_path = in_out_dir / f"cuts_{partition}.jsonl.gz"
+        cuts_path = manifest_dir / f"cuts_{partition}.jsonl.gz"
+        full_cuts_path = manifest_dir / f"cuts_{partition}_full.jsonl.gz"
         if cuts_path.is_file():
             logging.info(f"{cuts_path} exists - skipping")
             continue
 
-        raw_cuts_path = in_out_dir / f"cuts_{partition}_raw.jsonl.gz"
+        raw_cuts_path = manifest_dir / f"cuts_{partition}_raw.jsonl.gz"
 
         logging.info(f"Loading {raw_cuts_path}")
         cut_set = CutSet.from_file(raw_cuts_path)
@@ -62,7 +65,8 @@ def compute_fbank_gigaspeech_dev_test():
 
         cut_set = cut_set.compute_and_store_features_batch(
             extractor=extractor,
-            storage_path=f"{in_out_dir}/feats_{partition}",
+            storage_path=f"{feats_dir}/feats_{partition}",
+            manifest_path=full_cuts_path,
             num_workers=num_workers,
             batch_duration=batch_duration,
             overwrite=True,

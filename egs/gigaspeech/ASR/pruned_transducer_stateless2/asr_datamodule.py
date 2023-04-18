@@ -20,10 +20,11 @@ import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
+from lhotse.cut import Cut
 from lhotse.dataset import (
     CutConcatenate,
     CutMix,
@@ -33,7 +34,11 @@ from lhotse.dataset import (
     SingleCutSampler,
     SpecAugment,
 )
-from lhotse.dataset.input_strategies import OnTheFlyFeatures
+from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
+    AudioSamples,
+    BatchIO,
+    OnTheFlyFeatures,
+)
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
@@ -46,6 +51,47 @@ class _SeedWorkers:
 
     def __call__(self, worker_id: int):
         fix_random_seed(self.seed + worker_id)
+
+
+class SpeechRecognitionDataset(K2SpeechRecognitionDataset):
+    def __init__(
+        self,
+        return_cuts: bool = False,
+        input_strategy: BatchIO = PrecomputedFeatures(),
+    ):
+        super().__init__(return_cuts=return_cuts, input_strategy=input_strategy)
+
+    def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[Cut]]]:
+        """
+        Return a new batch, with the batch size automatically determined using the constraints
+        of max_frames and max_cuts.
+        """
+        self.hdf5_fix.update()
+
+        # Sort the cuts by duration so that the first one determines the batch time dimensions.
+        cuts = cuts.sort_by_duration(ascending=False)
+
+        # Get a tensor with batched feature matrices, shape (B, T, F)
+        # Collation performs auto-padding, if necessary.
+        input_tpl = self.input_strategy(cuts)
+        if len(input_tpl) == 3:
+            # An input strategy with fault tolerant audio reading mode.
+            # "cuts" may be a subset of the original "cuts" variable,
+            # that only has cuts for which we succesfully read the audio.
+            inputs, _, cuts = input_tpl
+        else:
+            inputs, _ = input_tpl
+
+        # Get a dict of tensors that encode the positional information about supervisions
+        # in the batch of feature matrices. The tensors are named "sequence_idx",
+        # "start_frame/sample" and "num_frames/samples".
+        supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+
+        batch = {"inputs": inputs, "supervisions": supervision_intervals}
+        if self.return_cuts:
+            batch["supervisions"]["cut"] = [cut for cut in cuts]
+
+        return batch
 
 
 class GigaSpeechAsrDataModule:
@@ -362,14 +408,22 @@ class GigaSpeechAsrDataModule:
 
         return valid_dl
 
-    def test_dataloaders(self, cuts: CutSet) -> DataLoader:
+    def test_dataloaders(self, cuts: CutSet, chunked: bool = False) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = K2SpeechRecognitionDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
-            if self.args.on_the_fly_feats
-            else PrecomputedFeatures(),
-            return_cuts=self.args.return_cuts,
-        )
+        if chunked:
+            test = SpeechRecognitionDataset(
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
+                if self.args.on_the_fly_feats
+                else PrecomputedFeatures(),
+                return_cuts=self.args.return_cuts,
+            )
+        else:
+            test = K2SpeechRecognitionDataset(
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
+                if self.args.on_the_fly_feats
+                else PrecomputedFeatures(),
+                return_cuts=self.args.return_cuts,
+            )
         sampler = DynamicBucketingSampler(
             cuts,
             max_duration=self.args.max_duration,
@@ -392,15 +446,17 @@ class GigaSpeechAsrDataModule:
         return cuts_train
 
     @lru_cache()
-    def dev_cuts(self) -> CutSet:
+    def dev_cuts(self, affix: str = "") -> CutSet:
         logging.info("About to get dev cuts")
-        cuts_valid = load_manifest_lazy(self.args.manifest_dir / "cuts_DEV.jsonl.gz")
+        cuts_valid = load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_DEV{affix}.jsonl.gz"
+        )
         if self.args.small_dev:
             return cuts_valid.subset(first=1000)
         else:
             return cuts_valid
 
     @lru_cache()
-    def test_cuts(self) -> CutSet:
+    def test_cuts(self, affix: str = "") -> CutSet:
         logging.info("About to get test cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "cuts_TEST.jsonl.gz")
+        return load_manifest_lazy(self.args.manifest_dir / f"cuts_TEST{affix}.jsonl.gz")

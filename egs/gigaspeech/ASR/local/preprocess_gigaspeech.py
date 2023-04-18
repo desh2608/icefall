@@ -44,13 +44,13 @@ def has_no_oov(
 
 def preprocess_giga_speech():
     src_dir = Path("data/manifests")
-    output_dir = Path("data/fbank")
+    output_dir = Path("data/manifests")
     output_dir.mkdir(exist_ok=True)
 
     dataset_parts = (
         "DEV",
         "TEST",
-        "XL",
+        # "XL",
     )
 
     logging.info("Loading manifest (may take 4 minutes)")
