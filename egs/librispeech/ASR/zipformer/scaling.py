@@ -33,17 +33,17 @@ class PiecewiseLinear(object):
     respectively.
     """
     def __init__(self, *args):
-        assert len(args) >= 1
+        assert len(args) >= 1, len(args)
         if len(args) == 1 and isinstance(args[0], PiecewiseLinear):
             self.pairs = list(args[0].pairs)
         else:
             self.pairs = [ (float(x), float(y)) for x,y in args ]
         for (x,y) in self.pairs:
-            assert isinstance(x, float) or isinstance(x, int)
-            assert isinstance(y, float) or isinstance(y, int)
+            assert isinstance(x, (float, int)), type(x)
+            assert isinstance(y, (float, int)), type(y)
 
         for i in range(len(self.pairs) - 1):
-            assert self.pairs[i + 1][0] > self.pairs[i][0], self.pairs
+            assert self.pairs[i + 1][0] > self.pairs[i][0], (i, self.pairs[i], self.pairs[i + 1])
 
     def __str__(self):
         # e.g. 'PiecewiseLinear((0., 10.), (100., 0.))'
@@ -68,7 +68,7 @@ class PiecewiseLinear(object):
             * [(x, y * alpha) for x, y in self.pairs])
 
     def __add__(self, x):
-        if isinstance(x, float) or isinstance(x, int):
+        if isinstance(x, (float, int)):
             return PiecewiseLinear(
                 * [(p[0], p[1] + x) for p in self.pairs])
         s, x = self.get_common_basis(x)
@@ -76,7 +76,7 @@ class PiecewiseLinear(object):
             * [(sp[0], sp[1] + xp[1]) for sp, xp in zip(s.pairs, x.pairs)])
 
     def max(self, x):
-        if isinstance(x, float) or isinstance(x, int):
+        if isinstance(x, (float, int)):
             x = PiecewiseLinear( (0, x) )
         s, x = self.get_common_basis(x, include_crossings=True)
         return PiecewiseLinear(
@@ -103,10 +103,10 @@ class PiecewiseLinear(object):
           include_crossings: if true, include in the x values positions
               where the functions indicate by this and p crosss.
         """
-        assert isinstance(p, PiecewiseLinear)
+        assert isinstance(p, PiecewiseLinear), type(p)
 
         # get sorted x-values without repetition.
-        x_vals = sorted(set([ x for x, y in self.pairs ] + [ x for x, y in p.pairs ]))
+        x_vals = sorted(set([ x for x, _ in self.pairs ] + [ x for x, _ in p.pairs ]))
         y_vals1 = [ self(x) for x in x_vals ]
         y_vals2 = [ p(x) for x in x_vals ]
 
@@ -144,7 +144,7 @@ class ScheduledFloat(torch.nn.Module):
     Example:
        self.dropout = ScheduledFloat((0.0, 0.2), (4000.0, 0.0), default=0.0)
 
-    `default` is used when self.batch_count is not set or in training or mode or in
+    `default` is used when self.batch_count is not set or not in training mode or in
      torch.jit scripting mode.
     """
     def __init__(self,
@@ -268,7 +268,7 @@ class SoftmaxFunction(torch.autograd.Function):
 
 
 def softmax(x: Tensor, dim: int):
-    if not x.requires_grad:
+    if not x.requires_grad or torch.jit.is_scripting():
         return x.softmax(dim=dim)
 
     return SoftmaxFunction.apply(x, dim)
@@ -406,7 +406,7 @@ class BiasNorm(torch.nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         assert x.shape[self.channel_dim] == self.num_channels
 
-        if torch.jit.is_scripting():
+        if torch.jit.is_scripting() or torch.jit.is_tracing():
             channel_dim = self.channel_dim
             if channel_dim < 0:
                 channel_dim += x.ndim
@@ -634,7 +634,7 @@ class ChunkCausalDepthwiseConv1d(torch.nn.Module):
         self,
         x: Tensor,
         cache: Tensor,
-    ) -> Tensor:
+    ) -> Tuple[Tensor, Tensor]:
         """Streaming Forward function.
 
         Args:
@@ -1073,6 +1073,8 @@ class ScaleGrad(nn.Module):
         self.alpha = alpha
 
     def forward(self, x: Tensor) -> Tensor:
+        if torch.jit.is_scripting() or not self.training:
+            return x
         return scale_grad(x, self.alpha)
 
 
@@ -1531,7 +1533,7 @@ class ActivationDropoutAndLinear(torch.nn.Module):
 
     def forward(self,
                 x: Tensor):
-        if torch.jit.is_scripting():
+        if torch.jit.is_scripting() or torch.jit.is_tracing():
             if self.activation == 'SwooshL':
                 x = SwooshLForward(x)
             elif self.activation == "SwooshR":
@@ -1553,7 +1555,7 @@ def convert_num_channels(x: Tensor, num_channels: int) -> Tensor:
     else:
         shape = list(x.shape)
         shape[-1] = num_channels - shape[-1]
-        zeros = torch.zeros(*shape, dtype=x.dtype, device=x.device)
+        zeros = torch.zeros(shape, dtype=x.dtype, device=x.device)
         return torch.cat((x, zeros), dim=-1)
 
 
