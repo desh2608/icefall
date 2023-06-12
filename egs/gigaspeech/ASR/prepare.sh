@@ -153,13 +153,17 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
   fi
 fi
 
+# if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
+#   log "Stage 6: Compute features for XL"
+#   num_splits=$(find data/fbank/XL_split -name "cuts_XL_raw.*.jsonl.gz" | wc -l)
+#   python3 ./local/compute_fbank_gigaspeech_splits.py \
+#     --num-workers 20 \
+#     --batch-duration 600 \
+#     --num-splits $num_splits
+# fi
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
-  log "Stage 6: Compute features for XL"
-  num_splits=$(find data/fbank/XL_split -name "cuts_XL_raw.*.jsonl.gz" | wc -l)
-  python3 ./local/compute_fbank_gigaspeech_splits.py \
-    --num-workers 20 \
-    --batch-duration 600 \
-    --num-splits $num_splits
+  log "Stage 6: Compute features for M and S subsets of GigaSpeech"
+  $cmd exp/feats_train.log python ./local/compute_fbank_gigaspeech_train.py
 fi
 
 if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then

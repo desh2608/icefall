@@ -3,11 +3,11 @@
 set -eou pipefail
 
 # Decode RNNT model
-queue-freegpu.pl --gpu 1 --mem 10G --config conf/gpu.conf pruned_transducer_stateless2/exp/v0/decode_modified.log \
-  python pruned_transducer_stateless2/decode.py \
+queue-freegpu.pl --gpu 1 --mem 10G --config conf/gpu.conf zipformer_ctc/exp/v1/decode_greedy.log \
+  python zipformer_ctc/decode.py \
     --epoch 99 --avg 1 \
-    --exp-dir pruned_transducer_stateless2/exp/v0 \
+    --exp-dir zipformer_ctc/exp/v1 \
     --manifest-dir data/manifests \
     --max-duration 500 \
-    --decoding-method modified_beam_search \
+    --decoding-method greedy_search \
     --beam-size 4
