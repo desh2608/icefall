@@ -93,6 +93,20 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--chunk",
+        type=float,
+        default=30.0,
+        help="""Chunk duration (in seconds) for decoding.""",
+    )
+
+    parser.add_argument(
+        "--extra",
+        type=float,
+        default=2.0,
+        help="""Extra duration (in seconds) at both sides.""",
+    )
+
+    parser.add_argument(
         "--epoch",
         type=int,
         default=29,
@@ -442,14 +456,15 @@ def main():
     args.return_cuts = True
     gigaspeech = GigaSpeechAsrDataModule(args)
 
-    dev_cuts = gigaspeech.dev_cuts(affix="_chunked")
-    test_cuts = gigaspeech.test_cuts(affix="_chunked")
+    affix = f"_chunk{int(params.chunk)}_extra{int(params.extra)}"
+    dev_cuts = gigaspeech.dev_cuts(affix=affix)
+    # test_cuts = gigaspeech.test_cuts(affix=affix)
 
     dev_dl = gigaspeech.test_dataloaders(dev_cuts, chunked=True)
-    test_dl = gigaspeech.test_dataloaders(test_cuts, chunked=True)
+    # test_dl = gigaspeech.test_dataloaders(test_cuts, chunked=True)
 
-    test_sets = ["DEV", "TEST"]
-    test_dls = [dev_dl, test_dl]
+    test_sets = [f"DEV{affix}"]
+    test_dls = [dev_dl]
 
     for test_set, test_dl in zip(test_sets, test_dls):
         cuts_writer = CutSet.open_writer(

@@ -63,12 +63,15 @@ def main():
     manifest_dir = Path(args.manifest_dir)
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
-    subsets = ["DEV", "TEST"]
+    subsets = ["DEV"]
 
     for subset in subsets:
         logging.info(f"Processing {subset} subset")
 
-        manifest_out = manifest_dir / f"cuts_{subset}_chunked.jsonl.gz"
+        manifest_out = (
+            manifest_dir
+            / f"cuts_{subset}_chunk{int(args.chunk)}_extra{int(args.extra)}.jsonl.gz"
+        )
         if manifest_out.is_file():
             logging.info(f"{manifest_out} already exists - skipping.")
             continue

@@ -17,7 +17,9 @@
 
 
 """
-This file merge overlapped chunks into utterances accroding to recording ids.
+This file merge overlapped chunks into utterances accroding to recording ids. We also
+create STM file for reference and CTM file for hypothesis. These can be used for scoring
+with NIST asclite.
 """
 
 import argparse
@@ -29,6 +31,7 @@ from cytoolz.itertoolz import groupby
 import sentencepiece as spm
 from icefall.utils import store_transcripts, write_error_stats
 from lhotse import CutSet, load_manifest
+from lhotse.supervision import AlignmentItem
 from lhotse import SupervisionSegment, MonoCut
 
 from gigaspeech_scoring import asr_text_post_processing
@@ -59,6 +62,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--chunk",
+        type=float,
+        default=30.0,
+        help="""Chunk duration (in seconds) for decoding.""",
+    )
+
+    parser.add_argument(
         "--extra",
         type=float,
         default=2.0,
@@ -66,6 +76,98 @@ def get_parser():
     )
 
     return parser.parse_args()
+
+
+def get_word_alignments(
+    tokens: List[AlignmentItem], words: List[str]
+) -> List[AlignmentItem]:
+    """
+    Get word-level alignments from token-level alignments.
+
+    Args:
+      tokens:
+        List of token-level alignments.
+      words:
+        List of words (obtained by decoding the BPE tokens).
+
+    Returns:
+      List of word-level alignments.
+    """
+    start_token = b"\xe2\x96\x81".decode()  # '_'
+    onset = None
+    offset = None
+    flag = False  # flag to indicate whether next word is the start of a word
+    res = []
+
+    # First compute the onset and offset of each word. The logic is as follows:
+    # 1. If a token starts with `_`, it means it is the start of a new word.
+    # 2. If a token does not start with `_`, it means it may be start of a new word
+    #    or continuation of a word. It is start of new word if previous token is `_`.
+    for i in range(len(tokens)):
+        if tokens[i].symbol.startswith(start_token):
+            # This means current word has ended. We will add it to the list.
+            if onset is not None and offset is not None:
+                res.append((onset, offset))
+                # reset onset and offset
+                onset = None
+                offset = None
+
+            if len(tokens[i].symbol) == 1:
+                # This is the `_` token. So next token is the start of a word. We turn on the flag.
+                flag = True
+            else:
+                # This is the start of a word
+                onset = tokens[i].start
+                offset = tokens[i].end
+                flag = False
+        else:
+            if flag is True:
+                # This is the first token of a word
+                onset = tokens[i].start
+                offset = tokens[i].end
+                flag = False
+            else:
+                # This is continuation of a word
+                assert onset is not None and offset is not None
+                offset = tokens[i].end
+    # Add the last word
+    if onset is not None and offset is not None:
+        res.append((onset, offset))
+    if len(words) > len(res):
+        words = words[: len(res)]
+    if len(res) > len(words):
+        res = res[: len(words)]
+    assert len(res) == len(words), (len(res), len(words))
+
+    # Then we create word-level alignments
+    word_alignments = []
+    for i in range(len(res)):
+        word_alignments.append(
+            AlignmentItem(
+                start=res[i][0],
+                duration=res[i][1] - res[i][0],
+                symbol=words[i],
+            )
+        )
+    return word_alignments
+
+
+def words_post_processing(text: List[AlignmentItem]) -> List[AlignmentItem]:
+    res = []
+    for item in text:
+        text = item.symbol
+        text = asr_text_post_processing(text)
+        if len(text) == 0:
+            continue
+        else:
+            res.append(
+                AlignmentItem(
+                    start=item.start,
+                    duration=item.duration,
+                    symbol=text,
+                )
+            )
+    return res
 
 
 def merge_chunks(
@@ -113,15 +215,28 @@ def merge_chunks(
             cur_end = right
 
             assert len(cut.supervisions) == 1, len(cut.supervisions)
-            for ali in cut.supervisions[0].alignment["symbol"]:
+            alis = cut.supervisions[0].alignment["symbol"]
+            for i, ali in enumerate(alis):
                 t = ali.start + cut.start
+                duration = (
+                    min(0.2, round(alis[i + 1].start - ali.start, 2))
+                    if i < len(alis) - 1
+                    else 0.2
+                )
                 if left <= t < right:
-                    alignments.append(ali.with_offset(cut.start))
+                    alignments.append(
+                        AlignmentItem(start=t, duration=duration, symbol=ali.symbol)
+                    )
 
         # Decode the BPE tokens to text
         hyp = [ali.symbol for ali in alignments]
         hyp_text = sp.decode(hyp)
-        hyp_text = asr_text_post_processing(hyp_text)
+
+        # We also want to compute word level alignments so we can get CTM file
+        # for scoring with NIST asclite.
+        hyp_word_alignments = get_word_alignments(alignments, hyp_text.split(" "))
+        hyp_word_alignments = words_post_processing(hyp_word_alignments)
+        hyp_text = " ".join(ali.symbol for ali in hyp_word_alignments)
 
         new_sup = SupervisionSegment(
             id=rec.id,
@@ -129,7 +244,7 @@ def merge_chunks(
             start=0,
             duration=rec.duration,
             text=hyp_text,
-            alignment={"symbol": alignments},
+            alignment={"symbol": alignments, "word": hyp_word_alignments},
             language=old_sup.language,
             speaker=old_sup.speaker,
             custom={"orig_text": old_text},
@@ -185,11 +300,17 @@ def main():
     sp = spm.SentencePieceProcessor()
     sp.load(args.bpe_model)
 
-    for part in ["DEV", "TEST"]:
+    for part in ["DEV"]:
         logging.info(f"Scoring {part}...")
-        recog_cuts = load_manifest(args.res_dir / f"cuts_{part}.jsonl.gz")
+        name = f"{part}_chunk{int(args.chunk)}_extra{int(args.extra)}"
+        scoring_dir = args.res_dir / f"{name}_scoring"
+        scoring_dir.mkdir(exist_ok=True)
+
+        recog_cuts = load_manifest(args.res_dir / f"cuts_{name}.jsonl.gz")
         orig_cuts = load_manifest(args.manifest_dir / f"cuts_{part}_full.jsonl.gz")
-        out_file = args.res_dir / f"cuts_{part}_merged.jsonl.gz"
+        out_file = args.res_dir / f"cuts_{name}_merged.jsonl.gz"
+        stm_file = scoring_dir / f"ref.stm"
+        ctm_file = scoring_dir / f"hyp.ctm"
 
         merged_cuts = merge_chunks(
             recog_cuts,
@@ -199,6 +320,21 @@ def main():
         )
         merged_cuts.to_file(out_file)
         logging.info(f"Cuts saved to {out_file}")
+
+        # Write CTM file
+        out_sups = merged_cuts.decompose()[1]
+        out_sups.write_alignment_to_ctm(ctm_file, type="word")
+
+        # Write STM file. Gigaspeech does not have speaker labels, so we assign different
+        # speaker labels to each supervision.
+        with open(stm_file, "w") as f:
+            for cut in orig_cuts:
+                for idx, sup in enumerate(cut.supervisions):
+                    text = asr_text_post_processing(sup.text)
+                    print(
+                        f"{sup.recording_id} {sup.channel} {sup.speaker} {sup.start:.2f} {sup.end:.2f} {text}",
+                        file=f,
+                    )
 
         results = []
         for cut in merged_cuts:
