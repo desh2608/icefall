@@ -28,6 +28,24 @@ We score these in 2 ways:
 
 1. Concatenated WER (c-WER): Concatenate all ref and hyp texts, and score using kaldialign.
     This kind of scoring does not take into account segmentation errors.
-2. sclite WER: We create reference STM files from the force-aligned CTM files (using different
+2. sclite WER (s-WER): We create reference STM files from the force-aligned CTM files (using different
     max-pause values), and score against the hyp CTM files using sclite. This kind of scoring
-    also takes into account segmentation errors.
+    also takes into account segmentation errors. 
+
+**NOTE:** c-WER is equivalent to s-WER with max-pause set to infinity. However, we compute
+it using kaldialign since sclite is extremely slow for alignment of long text. 
+
+### How to run long-form inference
+
+1. Download the BPE model and the zipformer checkpoint from HuggingFace:
+    <https://huggingface.co/desh2608/icefall-asr-tedlium3-zipformer>
+
+2. Download the reference CTM files from the following link:
+    <https://drive.google.com/file/d/1_LZhtOp3otR3rneHu2S6p5EP_O9tXLhp/view?usp=sharing>
+
+3. Extract the CTM files to `download/tedlium_ctc` folder.
+
+4. Run `decode_full.sh`. You may need to make some changes to the script, such as the
+    job submission commands.
+
+5. The c-WER and s-WER would be printed on the stdout.

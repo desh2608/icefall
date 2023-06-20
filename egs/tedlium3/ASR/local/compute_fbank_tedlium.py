@@ -23,14 +23,11 @@ The generated fbank features are saved in data/fbank.
 """
 
 import logging
-import os
 from pathlib import Path
 
 import torch
-from lhotse import CutSet, Fbank, FbankConfig, LilcomChunkyWriter
+from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
 from lhotse.recipes.utils import read_manifests_if_cached
-
-from icefall.utils import get_executor
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -38,19 +35,26 @@ from icefall.utils import get_executor
 # even when we are not invoking the main (e.g. when spawning subprocesses).
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def compute_fbank_tedlium():
     src_dir = Path("data/manifests")
-    output_dir = Path("data/fbank")
-    num_jobs = min(15, os.cpu_count())
+    feats_dir = Path("data/fbank")
     num_mel_bins = 80
 
-    dataset_parts = (
-        "train",
-        "dev",
-        "test",
-    )
+    # number of workers in dataloader
+    num_workers = 4
+
+    # number of seconds in a batch
+    batch_duration = 2000
+
+    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda", 0)
+    extractor = KaldifeatFbank(KaldifeatFbankConfig(device=device))
+
+    dataset_parts = ("train", "dev", "test")
 
     prefix = "tedlium"
     suffix = "jsonl.gz"
@@ -69,36 +73,31 @@ def compute_fbank_tedlium():
         dataset_parts,
     )
 
-    extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
+    for partition in dataset_parts:
+        cuts_path = src_dir / f"cuts_{partition}.jsonl.gz"
+        full_cuts_path = src_dir / f"cuts_{partition}_full.jsonl.gz"
+        if cuts_path.is_file():
+            logging.info(f"{cuts_path} exists - skipping")
+            continue
 
-    with get_executor() as ex:  # Initialize the executor only once.
-        for partition, m in manifests.items():
-            if (output_dir / f"{prefix}_cuts_{partition}.{suffix}").is_file():
-                logging.info(f"{partition} already exists - skipping.")
-                continue
-            logging.info(f"Processing {partition}")
-            cut_set = CutSet.from_manifests(
-                recordings=m["recordings"],
-                supervisions=m["supervisions"],
-            )
-            if "train" in partition:
-                cut_set = (
-                    cut_set + cut_set.perturb_speed(0.9) + cut_set.perturb_speed(1.1)
-                )
-            cur_num_jobs = num_jobs if ex is None else 80
-            cur_num_jobs = min(cur_num_jobs, len(cut_set))
+        cut_set = CutSet.from_manifests(**manifests[partition])
 
-            cut_set = cut_set.compute_and_store_features(
-                extractor=extractor,
-                storage_path=f"{output_dir}/{prefix}_feats_{partition}",
-                # when an executor is specified, make more partitions
-                num_jobs=cur_num_jobs,
-                executor=ex,
-                storage_type=LilcomChunkyWriter,
-            )
-            # Split long cuts into many short and un-overlapping cuts
-            cut_set = cut_set.trim_to_supervisions(keep_overlapping=False)
-            cut_set.to_file(output_dir / f"{prefix}_cuts_{partition}.{suffix}")
+        logging.info("Computing features")
+
+        cut_set = cut_set.compute_and_store_features_batch(
+            extractor=extractor,
+            storage_path=f"{feats_dir}/feats_{partition}",
+            manifest_path=full_cuts_path,
+            num_workers=num_workers,
+            batch_duration=batch_duration,
+            overwrite=True,
+        )
+        cut_set = cut_set.trim_to_supervisions(
+            keep_overlapping=False, min_duration=None
+        )
+
+        logging.info(f"Saving to {cuts_path}")
+        cut_set.to_file(cuts_path)
 
 
 if __name__ == "__main__":
