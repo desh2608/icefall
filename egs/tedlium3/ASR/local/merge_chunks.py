@@ -94,7 +94,7 @@ def get_word_alignments(
     start_token = b"\xe2\x96\x81".decode()  # '_'
     onset = None
     offset = None
-    flag = False  # flag to indicate whether next word is the start of a word
+    flag = True  # flag to indicate whether next word is the start of a word
     res = []
 
     # First compute the onset and offset of each word. The logic is as follows:
@@ -183,7 +183,9 @@ def merge_chunks(
         Extra duration (in seconds) to drop at both sides of each chunk.
     """
     # Divide into groups according to their recording ids
-    cut_groups = groupby(lambda cut: cut.recording.id, cuts_chunk)
+    cut_groups = groupby(
+        lambda cut: cut.recording.id, sorted(cuts_chunk, key=lambda c: c.recording_id)
+    )
 
     # Get original cuts by recording ids
     orig_cuts = {c.recording.id: c for c in cuts_orig}
@@ -199,27 +201,22 @@ def merge_chunks(
 
         rec = chunk_cuts[0].recording
         alignments = []
-        cur_end = 0
         for cut in chunk_cuts:
             # Get left and right borders
             left = cut.start + extra if cut.start > 0 else 0
-            chunk_end = cut.start + cut.duration
-            right = chunk_end - extra if chunk_end < rec.duration else rec.duration
-
-            # Assert the chunks are continuous
-            assert left == cur_end, (left, cur_end)
-            cur_end = right
+            right = cut.end - extra if cut.end < rec.duration else rec.duration
 
             assert len(cut.supervisions) == 1, len(cut.supervisions)
             alis = cut.supervisions[0].alignment["symbol"]
             for i, ali in enumerate(alis):
                 t = ali.start + cut.start
-                duration = (
-                    min(0.2, round(alis[i + 1].start - ali.start, 2))
-                    if i < len(alis) - 1
-                    else 0.2
-                )
                 if left <= t < right:
+                    # We assume that a BPE token can be at most 0.2 seconds long.
+                    duration = (
+                        min(0.2, round(alis[i + 1].start - ali.start, 2))
+                        if i < len(alis) - 1
+                        else 0.2
+                    )
                     alignments.append(
                         AlignmentItem(start=t, duration=duration, symbol=ali.symbol)
                     )
@@ -287,7 +284,7 @@ def save_results(
 
     errs_info = res_dir / f"wer-summary-{test_set_name}.txt"
     with open(errs_info, "w") as f:
-        print("WER: {:.2f}".format(wer * 100), file=f)
+        print("WER: {:.2f}".format(wer), file=f)
 
 
 def main():
@@ -322,18 +319,20 @@ def main():
         out_sups.write_alignment_to_ctm(ctm_file, type="word")
 
         # Write STM file. Some cuts have overlapping segments from the same speaker,
-        # which is not allowed in STM file. We will trim the problematic supervisions.
+        # which is not allowed in STM file. We will merge these supervisions.
         with open(stm_file, "w") as f:
             for cut in orig_cuts:
                 new_sups = []
                 for sup in sorted(cut.supervisions, key=lambda x: x.start):
-                    if new_sups and new_sups[-1].end > sup.start:
-                        # Trim the previous supervision
+                    if new_sups and new_sups[-1].end >= sup.start:
                         old_sup = new_sups[-1]
                         new_sups[-1] = fastcopy(
-                            old_sup, duration=sup.start - old_sup.start
+                            old_sup,
+                            duration=sup.end - old_sup.start,
+                            text=old_sup.text + " " + sup.text,
                         )
-                    new_sups.append(sup)
+                    else:
+                        new_sups.append(sup)
                 for sup in new_sups:
                     print(
                         f"{sup.recording_id} {sup.channel} {sup.speaker} {sup.start:.2f} {sup.end:.2f} {sup.text}",

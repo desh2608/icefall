@@ -285,7 +285,10 @@ def decode_one_batch(
         timestamps.append(
             convert_timestamp(res.timestamps[i], params.subsampling_factor)
         )
-        scores.append(res.scores[i])
+        try:
+            scores.append(res.scores[i])
+        except TypeError:
+            scores.append([0.0] * len(hyps[i]))
 
     return hyps, timestamps, scores
 

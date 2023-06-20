@@ -19,6 +19,7 @@ extra=4
 
 stage=1
 stop_stage=4
+exp_dir=zipformer/exp/v5
 decoding_method=greedy_search
 
 # scoring options
@@ -49,10 +50,10 @@ fi
 
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   log "Stage 2: Perform speech recognition on splitted chunks"
-  $decode_cmd zipformer/exp/v5/decode_chunked_greedy.log \
+  $decode_cmd $exp_dir/decode_chunked_${decoding_method}.log \
     python zipformer/decode_chunked.py \
       --epoch 99 --avg 1 \
-      --exp-dir zipformer/exp/v5 \
+      --exp-dir $exp_dir \
       --manifest-dir data/manifests \
       --max-duration 600 \
       --decoding-method ${decoding_method} \
@@ -63,19 +64,26 @@ fi
 if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   log "Stage 3: Merge splitted chunks into utterances and score."
   python local/merge_chunks.py \
-    --res-dir zipformer/exp/v5/${decoding_method}-chunked \
+    --res-dir ${exp_dir}/${decoding_method}-chunked \
     --manifest-dir data/manifests \
     --bpe-model data/lang_bpe_500/bpe.model \
     --chunk $chunk --extra $extra
 fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
-  log "Stage 4: Compute Asclite WER"
-  for part in dev; do
-    scoring_dir=zipformer/exp/v5/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
-    $score_cmd $scoring_dir/scoring.log \
-      $hubscr -G -v -m 1:2 -o$overlap_spk -a -C -B 8192 -p $hubdir \
-        -V -l english -h rt-stt -g conf/dummy.glm \
-        -r $scoring_dir/ref.stm $scoring_dir/hyp.ctm
+  log "Stage 4: Compute WERs"
+  for part in dev test; do
+    scoring_dir=${exp_dir}/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
+    mkdir -p $scoring_dir
+    cat $scoring_dir/hyp.ctm | python local/join_suffix.py > $scoring_dir/hyp_score.ctm
+    for pause in 0.0 0.2 0.5; do
+      log "split: $part pause: $pause"
+      scoring_dir_pause=${scoring_dir}/pause${pause}
+      mkdir -p $scoring_dir_pause
+      cat download/tedlium_ctm/${part}.ctm | python local/ctm_to_stm.py --max-pause $pause > $scoring_dir_pause/ref.stm
+      sclite -r $scoring_dir_pause/ref.stm stm -h $scoring_dir/hyp_score.ctm ctm \
+        -O $scoring_dir_pause -o all
+      grep "Sum/Avg" $scoring_dir_pause/hyp_score.ctm.sys 
+    done
   done
 fi

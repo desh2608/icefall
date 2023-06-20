@@ -79,9 +79,8 @@ def main():
         manifest_in = args.manifest_dir / f"cuts_{subset}_full.jsonl.gz"
 
         cuts = load_manifest(manifest_in)
-        cuts = cuts.cut_into_windows(
-            duration=args.chunk, hop=args.chunk - args.extra * 2
-        )
+        cuts = cuts.cut_into_windows(duration=args.chunk)
+        cuts = cuts.extend_by(args.extra, direction="both", pad_silence=False)
         # Remove existing supervisions and add empty ones.
         cuts = cuts.drop_supervisions()
         cuts = cuts.fill_supervisions()
