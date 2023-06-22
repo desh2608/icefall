@@ -444,6 +444,16 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
+    parser.add_argument(
+        "--delay-penalty",
+        type=float,
+        default=0.0,
+        help="""A constant value used to penalize symbol delay,
+        to encourage streaming models to emit symbols earlier.
+        See https://github.com/k2-fsa/k2/issues/955 and
+        https://arxiv.org/pdf/2211.00490.pdf for more details.""",
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -750,6 +760,7 @@ def compute_loss(
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
+    warmup = batch_idx_train / warm_step
 
     texts = batch["supervisions"]["text"]
     y = convert_texts_into_ids(texts, sp)
@@ -763,6 +774,7 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            delay_penalty=params.delay_penalty if warmup >= 2.0 else 0,
         )
 
         s = params.simple_loss_scale
