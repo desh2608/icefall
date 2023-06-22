@@ -19,7 +19,7 @@ extra=4
 
 stage=1
 stop_stage=4
-exp_dir=zipformer/exp/
+exp_dir=zipformer/exp/v6
 decoding_method=greedy_search
 
 # scoring options
