@@ -26,14 +26,12 @@ stop_stage=100
 dl_dir=$PWD/download
 
 . shared/parse_options.sh || exit 1
+cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
 
 # vocab size for sentence piece models.
 # It will generate data/lang_bpe_xxx,
 # data/lang_bpe_yyy if the array contains xxx, yyy
 vocab_sizes=(
-  5000
-  2000
-  1000
   500
 )
 
@@ -107,12 +105,10 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   if [ ! -e data/fbank/.tedlium3.done ]; then
     mkdir -p data/fbank
 
-    python3 ./local/compute_fbank_tedlium.py
+    $cmd exp/feats.log python local/compute_fbank_tedlium.py
 
-    gunzip -c data/fbank/tedlium_cuts_train.jsonl.gz | shuf | \
-    gzip -c > data/fbank/tedlium_cuts_train-shuf.jsonl.gz
-    mv data/fbank/tedlium_cuts_train-shuf.jsonl.gz \
-       data/fbank/tedlium_cuts_train.jsonl.gz
+    gunzip -c data/manifests/cuts_train.jsonl.gz | shuf | gzip -c > data/manifests/cuts_train_shuf.jsonl.gz
+    mv data/manifests/cuts_train_shuf.jsonl.gz data/manifests/cuts_train.jsonl.gz
 
     touch data/fbank/.tedlium3.done
   fi
