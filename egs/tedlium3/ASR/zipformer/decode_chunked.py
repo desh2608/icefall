@@ -51,7 +51,10 @@ import torch
 import torch.nn as nn
 from asr_datamodule import TedLiumAsrDataModule
 from beam_search import (
+    beam_search,
     fast_beam_search_one_best,
+    fast_beam_search_nbest,
+    greedy_search,
     greedy_search_batch,
     modified_beam_search,
 )
@@ -141,6 +144,7 @@ def get_parser():
           - beam_search
           - modified_beam_search
           - fast_beam_search
+          - fast_beam_search_nbest
         """,
     )
 
@@ -191,6 +195,24 @@ def get_parser():
         default=1,
         help="""Maximum number of symbols per frame.
         Used only when --decoding_method is greedy_search""",
+    )
+
+    parser.add_argument(
+        "--num-paths",
+        type=int,
+        default=200,
+        help="""Number of paths for nbest decoding.
+        Used only when the decoding method is fast_beam_search_nbest,
+        fast_beam_search_nbest_LG, and fast_beam_search_nbest_oracle""",
+    )
+
+    parser.add_argument(
+        "--nbest-scale",
+        type=float,
+        default=0.5,
+        help="""Scale applied to lattice scores when computing nbest paths.
+        Used only when the decoding method is fast_beam_search_nbest,
+        fast_beam_search_nbest_LG, and fast_beam_search_nbest_oracle""",
     )
 
     add_model_arguments(parser)
@@ -257,9 +279,24 @@ def decode_one_batch(
             beam=params.beam,
             max_contexts=params.max_contexts,
             max_states=params.max_states,
+            allow_partial=True,
             return_timestamps=True,
         )
-    elif params.decoding_method == "greedy_search":
+    elif params.decoding_method == "fast_beam_search_nbest":
+        res = fast_beam_search_nbest(
+            model=model,
+            decoding_graph=decoding_graph,
+            encoder_out=encoder_out,
+            encoder_out_lens=encoder_out_lens,
+            beam=params.beam,
+            max_contexts=params.max_contexts,
+            max_states=params.max_states,
+            num_paths=params.num_paths,
+            nbest_scale=params.nbest_scale,
+            allow_partial=True,
+            return_timestamps=True,
+        )
+    elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         res = greedy_search_batch(
             model=model,
             encoder_out=encoder_out,
@@ -275,7 +312,32 @@ def decode_one_batch(
             return_timestamps=True,
         )
     else:
-        raise ValueError(f"Unsupported decoding method: {params.decoding_method}")
+        batch_size = encoder_out.size(0)
+        res = []
+
+        for i in range(batch_size):
+            # fmt: off
+            encoder_out_i = encoder_out[i:i+1, :encoder_out_lens[i]]
+            # fmt: on
+            if params.decoding_method == "greedy_search":
+                hyp = greedy_search(
+                    model=model,
+                    encoder_out=encoder_out_i,
+                    max_sym_per_frame=params.max_sym_per_frame,
+                    return_timestamps=True,
+                )
+            elif params.decoding_method == "beam_search":
+                hyp = beam_search(
+                    model=model,
+                    encoder_out=encoder_out_i,
+                    beam=params.beam_size,
+                    return_timestamps=True,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported decoding method: {params.decoding_method}"
+                )
+            res.append(hyp)
 
     hyps = []
     timestamps = []
@@ -377,6 +439,7 @@ def main():
         "greedy_search",
         "beam_search",
         "fast_beam_search",
+        "fast_beam_search_nbest",
         "modified_beam_search",
     )
     params.res_dir = params.exp_dir / f"{params.decoding_method}-chunked"
@@ -450,7 +513,7 @@ def main():
     model.eval()
     model.device = device
 
-    if params.decoding_method == "fast_beam_search":
+    if "fast_beam_search" in params.decoding_method:
         decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
     else:
         decoding_graph = None

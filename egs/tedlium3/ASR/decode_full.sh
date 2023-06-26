@@ -3,7 +3,6 @@
 
 # fix segmentation fault reported in https://github.com/k2-fsa/icefall/issues/674
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-export KALDI_ROOT=/home/hltcoe/draj/kaldi
 
 set -eou pipefail
 
@@ -18,15 +17,9 @@ chunk=30
 extra=4
 
 stage=1
-stop_stage=4
-exp_dir=zipformer/exp/v6
+stop_stage=3
+exp_dir=zipformer/exp/v5
 decoding_method=greedy_search
-
-# scoring options
-overlap_spk=2
-hubscr=$KALDI_ROOT/tools/sctk/bin/hubscr.pl
-[ ! -f $hubscr ] && echo "Cannot find scoring program at $hubscr" && exit 1;
-hubdir=`dirname $hubscr`
 
 decode_cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
 score_cmd="queue.pl --mem 12G"
@@ -66,6 +59,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   python local/merge_chunks.py \
     --res-dir ${exp_dir}/${decoding_method}-chunked \
     --manifest-dir data/manifests \
+    --reference-ctm-dir download/tedlium_ctm \
     --bpe-model data/lang_bpe_500/bpe.model \
     --chunk $chunk --extra $extra
 fi

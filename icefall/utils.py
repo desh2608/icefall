@@ -491,6 +491,7 @@ def write_error_stats(
     test_set_name: str,
     results: List[Tuple[str, str]],
     enable_log: bool = True,
+    sclite_mode: bool = False,
 ) -> float:
     """Write statistics based on predicted results and reference transcripts.
 
@@ -536,7 +537,7 @@ def write_error_stats(
     num_corr = 0
     ERR = "*"
     for cut_id, ref, hyp in results:
-        ali = kaldialign.align(ref, hyp, ERR)
+        ali = kaldialign.align(ref, hyp, ERR, sclite_mode=sclite_mode)
         for ref_word, hyp_word in ali:
             if ref_word == ERR:
                 ins[hyp_word] += 1
@@ -581,7 +582,7 @@ def write_error_stats(
     print("", file=f)
     print("PER-UTT DETAILS: corr or (ref->hyp)  ", file=f)
     for cut_id, ref, hyp in results:
-        ali = kaldialign.align(ref, hyp, ERR)
+        ali = kaldialign.align(ref, hyp, ERR, sclite_mode=sclite_mode)
         combine_successive_errors = True
         if combine_successive_errors:
             ali = [[[x], [y]] for x, y in ali]
@@ -661,6 +662,7 @@ def write_error_stats_with_timestamps(
     ],
     enable_log: bool = True,
     with_end_time: bool = False,
+    sclite_mode: bool = False,
 ) -> Tuple[float, Union[float, Tuple[float, float]], Union[float, Tuple[float, float]]]:
     """Write statistics based on predicted results and reference transcripts
     as well as their timestamps.
@@ -712,7 +714,7 @@ def write_error_stats_with_timestamps(
     # Compute mean alignment delay on the correct words
     all_delay = []
     for cut_id, ref, hyp, time_ref, time_hyp in results:
-        ali = kaldialign.align(ref, hyp, ERR)
+        ali = kaldialign.align(ref, hyp, ERR, sclite_mode=sclite_mode)
         has_time = len(time_ref) > 0 and len(time_hyp) > 0
         if has_time:
             # pointer to timestamp_hyp
@@ -823,7 +825,7 @@ def write_error_stats_with_timestamps(
     print("", file=f)
     print("PER-UTT DETAILS: corr or (ref->hyp)  ", file=f)
     for cut_id, ref, hyp, _, _ in results:
-        ali = kaldialign.align(ref, hyp, ERR)
+        ali = kaldialign.align(ref, hyp, ERR, sclite_mode=sclite_mode)
         combine_successive_errors = True
         if combine_successive_errors:
             ali = [[[x], [y]] for x, y in ali]

@@ -23,11 +23,14 @@ with NIST asclite.
 """
 
 import argparse
+import kaldialign
 import logging
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 from cytoolz.itertoolz import groupby
 
+import numpy as np
 import sentencepiece as spm
 from icefall.utils import store_transcripts, write_error_stats
 from lhotse import CutSet, load_manifest, SupervisionSegment, MonoCut
@@ -60,6 +63,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--reference-ctm-dir",
+        type=Path,
+        default=None,
+        help="Path to directory containing reference CTM files.",
+    )
+
+    parser.add_argument(
         "--chunk",
         type=float,
         default=30.0,
@@ -76,17 +86,13 @@ def get_parser():
     return parser.parse_args()
 
 
-def get_word_alignments(
-    tokens: List[AlignmentItem], words: List[str]
-) -> List[AlignmentItem]:
+def get_word_alignments(tokens: List[AlignmentItem]) -> List[AlignmentItem]:
     """
     Get word-level alignments from token-level alignments.
 
     Args:
       tokens:
         List of token-level alignments.
-      words:
-        List of words (obtained by decoding the BPE tokens).
 
     Returns:
       List of word-level alignments.
@@ -94,21 +100,24 @@ def get_word_alignments(
     start_token = b"\xe2\x96\x81".decode()  # '_'
     onset = None
     offset = None
+    word = ""
     flag = True  # flag to indicate whether next word is the start of a word
     res = []
 
     # First compute the onset and offset of each word. The logic is as follows:
-    # 1. If a token starts with `_`, it means it is the start of a new word.
-    # 2. If a token does not start with `_`, it means it may be start of a new word
-    #    or continuation of a word. It is start of new word if previous token is `_`.
+    # 1. If the token is `_`, it means the next token is the start of a word.
+    # 2. If a token starts with `_`, it means it is the start of a new word.
+    # 3. Otherwise, it is the continuation of a word.
+    tokens = sorted(tokens, key=lambda x: x.start)
     for i in range(len(tokens)):
         if tokens[i].symbol.startswith(start_token):
             # This means current word has ended. We will add it to the list.
             if onset is not None and offset is not None:
-                res.append((onset, offset))
+                res.append((onset, offset, word))
                 # reset onset and offset
                 onset = None
                 offset = None
+                word = ""
 
             if len(tokens[i].symbol) == 1:
                 # This is the `_` token. So next token is the start of a word. We turn on the flag.
@@ -117,25 +126,23 @@ def get_word_alignments(
                 # This is the start of a word
                 onset = tokens[i].start
                 offset = tokens[i].end
+                word = tokens[i].symbol[1:]
                 flag = False
         else:
             if flag is True:
                 # This is the first token of a word
                 onset = tokens[i].start
                 offset = tokens[i].end
+                word = tokens[i].symbol
                 flag = False
             else:
                 # This is continuation of a word
                 assert onset is not None and offset is not None
                 offset = tokens[i].end
+                word += tokens[i].symbol
     # Add the last word
     if onset is not None and offset is not None:
-        res.append((onset, offset))
-    if len(words) > len(res):
-        words = words[: len(res)]
-    if len(res) > len(words):
-        res = res[: len(words)]
-    assert len(res) == len(words), (len(res), len(words))
+        res.append((onset, offset, word))
 
     # Then we create word-level alignments
     word_alignments = []
@@ -144,7 +151,7 @@ def get_word_alignments(
             AlignmentItem(
                 start=res[i][0],
                 duration=res[i][1] - res[i][0],
-                symbol=words[i],
+                symbol=res[i][2],
             )
         )
     return word_alignments
@@ -208,7 +215,7 @@ def merge_chunks(
 
             assert len(cut.supervisions) == 1, len(cut.supervisions)
             alis = cut.supervisions[0].alignment["symbol"]
-            for i, ali in enumerate(alis):
+            for i, ali in enumerate(sorted(alis, key=lambda a: a.start)):
                 t = ali.start + cut.start
                 if left <= t < right:
                     # We assume that a BPE token can be at most 0.2 seconds long.
@@ -227,8 +234,8 @@ def merge_chunks(
 
         # We also want to compute word level alignments so we can get CTM file
         # for scoring with NIST asclite.
-        hyp_word_alignments = get_word_alignments(alignments, hyp_text.split(" "))
-        hyp_word_alignments = words_post_processing(hyp_word_alignments)
+        hyp_word_alignments = get_word_alignments(alignments)
+        # hyp_word_alignments = words_post_processing(hyp_word_alignments)
         hyp_text = " ".join(ali.symbol for ali in hyp_word_alignments)
 
         new_sup = SupervisionSegment(
@@ -278,13 +285,50 @@ def save_results(
     # ref/hyp pairs.
     errs_filename = res_dir / f"errs-{test_set_name}.txt"
     with open(errs_filename, "w") as f:
-        wer = write_error_stats(f, f"{test_set_name}", results, enable_log=True)
+        wer = write_error_stats(
+            f, f"{test_set_name}", results, enable_log=True, sclite_mode=True
+        )
 
     logging.info("Wrote detailed error stats to {}".format(errs_filename))
 
     errs_info = res_dir / f"wer-summary-{test_set_name}.txt"
     with open(errs_info, "w") as f:
         print("WER: {:.2f}".format(wer), file=f)
+
+
+def read_words_from_ctm(file):
+    words = defaultdict(list)
+    with open(file, "r") as f:
+        for line in f:
+            reco_id, channel, start, dur, word, *_ = line.strip().split()
+            start = float(start)
+            end = round(start + float(dur), 2)
+            words[reco_id].append((start, end, word))
+    return words
+
+
+def align(a, b):
+    """
+    Here a and b are tuples of (start, end, word).
+    """
+    ax = [x[2] for x in a]
+    bx = [x[2] for x in b]
+    ali = kaldialign.align(ax, bx, "*", sclite_mode=True)
+
+    i = 0
+    j = 0
+    ali_times = []
+    for (ai, bj) in ali:
+        if ai == bj:
+            a_mean = (a[i][0] + a[i][1]) / 2
+            b_mean = (b[j][0] + b[j][1]) / 2
+            delay = round(b_mean - a_mean, 3)
+            ali_times.append((a[i], b[j], delay))
+        if ai != "*":
+            i += 1
+        if bj != "*":
+            j += 1
+    return ali_times
 
 
 def main():
@@ -302,6 +346,7 @@ def main():
         recog_cuts = load_manifest(args.res_dir / f"cuts_{name}.jsonl.gz")
         orig_cuts = load_manifest(args.manifest_dir / f"cuts_{part}_full.jsonl.gz")
         out_file = args.res_dir / f"cuts_{name}_merged.jsonl.gz"
+        ref_ctm_file = args.reference_ctm_dir / f"{part}.ctm"
         stm_file = scoring_dir / f"ref.stm"
         ctm_file = scoring_dir / f"hyp.ctm"
 
@@ -348,6 +393,20 @@ def main():
             hyp = hyp.split()
             results.append((cut.id, ref, hyp))
         save_results(args.res_dir, part, results)
+
+        # Compute word emission delay
+        ref_words = read_words_from_ctm(ref_ctm_file)
+        hyp_words = read_words_from_ctm(ctm_file)
+
+        delays = []
+        for reco_id in ref_words:
+            res = align(ref_words[reco_id], hyp_words[reco_id])
+            delays.extend([r[2] for r in res])
+
+        # compute mean and std
+        mean = np.mean(delays)
+        std = np.std(delays)
+        print(f"Mean delay: {mean:.3f}, std: {std:.3f}")
 
 
 if __name__ == "__main__":
