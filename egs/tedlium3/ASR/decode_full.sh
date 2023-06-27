@@ -13,12 +13,20 @@ set -eou pipefail
 
 # Each chunk (except the first and the last) is padded with extra left side and right side.
 # The chunk length is: left_side + chunk_size + right_side.
+
+# SCORING STRATEGY
+# We compute the following metrics:
+# 1) Concatenated WER: merge all ground-truth transcripts and hypotheses and then score.
+# 2) SCLITE WER: compute WER using reference STM and hypothesis CTM. This will ignore the
+#    segments marked as "ignore_time_segment_in_scoring" in STM.
+# 3) Mean delay: For the aligned words, we compute the mean delay between the reference and
+#    the hypothesis.
 chunk=30
 extra=4
 
 stage=1
-stop_stage=3
-exp_dir=zipformer/exp/v5
+stop_stage=4
+exp_dir=zipformer/exp
 decoding_method=greedy_search
 
 decode_cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
@@ -65,11 +73,26 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
 fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
+  log "Stage 4: Compute WERs using sclite"
+  for part in dev test; do
+    scoring_dir=${exp_dir}/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
+    mkdir -p $scoring_dir
+    cat $scoring_dir/hyp.ctm | python local/join_suffix_ctm.py > $scoring_dir/hyp_score.ctm
+    cat download/tedlium3/legacy/$part/stm/*.stm | python local/join_suffix_stm.py > $scoring_dir/ref.stm
+    sclite -r $scoring_dir/ref.stm stm -h $scoring_dir/hyp_score.ctm ctm \
+      -O $scoring_dir -o all
+    grep "Sum/Avg" $scoring_dir/hyp_score.ctm.sys 
+  done
+fi
+
+exit 1
+# The following is deprecated.
+if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   log "Stage 4: Compute WERs"
   for part in dev test; do
     scoring_dir=${exp_dir}/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
     mkdir -p $scoring_dir
-    cat $scoring_dir/hyp.ctm | python local/join_suffix.py > $scoring_dir/hyp_score.ctm
+    cat $scoring_dir/hyp.ctm | python local/join_suffix_ctm.py > $scoring_dir/hyp_score.ctm
     for pause in 0.0 0.2 0.5; do
       log "split: $part pause: $pause"
       scoring_dir_pause=${scoring_dir}/pause${pause}
