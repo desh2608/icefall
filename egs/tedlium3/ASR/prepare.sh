@@ -206,10 +206,3 @@ if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     fi
   done
 fi
-
-# Prepare CTM file using TorchAudio
-if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
-  log "Stage 9: Prepare CTM file using TorchAudio"
-
-  $cmd exp/prepare_ctm.log python local/prepare_ctm.py
-fi
