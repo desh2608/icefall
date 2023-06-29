@@ -26,7 +26,7 @@ extra=4
 
 stage=1
 stop_stage=4
-exp_dir=zipformer/exp
+exp_dir=zipformer/exp/v5
 decoding_method=greedy_search
 
 decode_cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
@@ -52,7 +52,7 @@ fi
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   log "Stage 2: Perform speech recognition on splitted chunks"
   $decode_cmd $exp_dir/decode_chunked_${decoding_method}.log \
-    python zipformer/decode_chunked.py \
+    python zipformer/chunked_decode.py \
       --epoch 99 --avg 1 \
       --exp-dir $exp_dir \
       --manifest-dir data/manifests \

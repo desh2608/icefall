@@ -89,6 +89,7 @@ class Transducer(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         delay_penalty: float = 0.0,
+        rnnt_type: str = "regular",
     ) -> torch.Tensor:
         """
         Args:
@@ -187,6 +188,7 @@ class Transducer(nn.Module):
                 reduction="sum",
                 delay_penalty=delay_penalty,
                 return_grad=True,
+                rnnt_type=rnnt_type,
             )
 
         # ranges : [B, T, prune_range]
@@ -220,6 +222,7 @@ class Transducer(nn.Module):
                 boundary=boundary,
                 delay_penalty=delay_penalty,
                 reduction="sum",
+                rnnt_type=rnnt_type,
             )
 
         return (simple_loss, pruned_loss)

@@ -1,0 +1,3 @@
+[submodule "soundslike"]
+	path = egs/soundslike
+	url = https://github.com/JSALT2023-FSM/soundslike_icefall.git

@@ -355,6 +355,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--rnnt-type",
+        type=str,
+        default="regular",
+        choices=["regular", "modified", "constrained"],
+    )
+
+    parser.add_argument(
         "--lm-scale",
         type=float,
         default=0.25,
@@ -775,6 +782,7 @@ def compute_loss(
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
             delay_penalty=params.delay_penalty if warmup >= 2.0 else 0,
+            rnnt_type=params.rnnt_type,
         )
 
         s = params.simple_loss_scale
