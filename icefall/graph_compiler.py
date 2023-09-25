@@ -30,6 +30,7 @@ class CtcTrainingGraphCompiler(object):
         device: torch.device,
         oov: str = "<UNK>",
         need_repeat_flag: bool = False,
+        modified: bool = False,
     ):
         """
         Args:
@@ -58,7 +59,7 @@ class CtcTrainingGraphCompiler(object):
         self.word_table = lexicon.word_table
 
         max_token_id = max(lexicon.tokens)
-        ctc_topo = k2.ctc_topo(max_token_id, modified=False)
+        ctc_topo = k2.ctc_topo(max_token_id, modified=modified)
 
         self.ctc_topo = ctc_topo.to(device)
 
