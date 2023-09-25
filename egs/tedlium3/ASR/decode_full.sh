@@ -6,28 +6,24 @@ export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 set -eou pipefail
 
-# This script is used to recogize long audios. The process is as follows:
-# 1) Split long audios into chunks with overlaps.
-# 2) Perform speech recognition on chunks, getting tokens and timestamps.
-# 3) Merge the overlapped chunks into utterances acording to the timestamps.
+# This script is used to recogize long audios. It is similar to decode_full.sh, but instead of
+# chunking and decoding each chunk, we chunk on-the-fly and only compute encoder outputs
+# for each chunk separately. The decoding is performed on the merged encoder outputs.
 
 # Each chunk (except the first and the last) is padded with extra left side and right side.
 # The chunk length is: left_side + chunk_size + right_side.
-
-# SCORING STRATEGY
-# We compute the following metrics:
-# 1) Concatenated WER: merge all ground-truth transcripts and hypotheses and then score.
-# 2) SCLITE WER: compute WER using reference STM and hypothesis CTM. This will ignore the
-#    segments marked as "ignore_time_segment_in_scoring" in STM.
-# 3) Mean delay: For the aligned words, we compute the mean delay between the reference and
-#    the hypothesis.
+# After computing the encoder outputs, the extra left side and right side are removed.
 chunk=30
 extra=4
 
 stage=1
-stop_stage=4
-exp_dir=zipformer/exp/v5
+stop_stage=2
+exp_dir=zipformer/exp_new/a0a
+epoch=50
+avg=22
+use_averaged_model=True
 decoding_method=greedy_search
+decode_batch_size=32
 
 decode_cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
 score_cmd="queue.pl --mem 12G"
@@ -41,66 +37,28 @@ log() {
 }
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
-  # Chunk manifests are saved to data/manifests/cuts_{subset}_chunks.jsonl.gz
-  log "Stage 1: Split long audio into chunks"
-  python local/split_into_chunks.py \
-    --manifest-dir data/manifests \
-    --chunk $chunk \
-    --extra $extra  # Extra duration (in seconds) at both sides
-fi
-
-if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
-  log "Stage 2: Perform speech recognition on splitted chunks"
-  $decode_cmd $exp_dir/decode_chunked_${decoding_method}.log \
-    python zipformer/chunked_decode.py \
-      --epoch 99 --avg 1 \
+  log "Stage 1: Perform speech recognition on full recordings"
+  $decode_cmd $exp_dir/decode_full_${decoding_method}.log \
+    python zipformer/full_decode.py \
+      --epoch $epoch --avg $avg --use-averaged-model $use_averaged_model \
       --exp-dir $exp_dir \
+      --reference-ctm-dir download/tedlium_ctm \
       --manifest-dir data/manifests \
       --max-duration 600 \
       --decoding-method ${decoding_method} \
-      --chunk $chunk --extra $extra \
+      --chunk $chunk --extra $extra --decode-batch-size $decode_batch_size \
       --beam-size 4
 fi
 
-if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
-  log "Stage 3: Merge splitted chunks into utterances and score."
-  python local/merge_chunks.py \
-    --res-dir ${exp_dir}/${decoding_method}-chunked \
-    --manifest-dir data/manifests \
-    --reference-ctm-dir download/tedlium_ctm \
-    --bpe-model data/lang_bpe_500/bpe.model \
-    --chunk $chunk --extra $extra
-fi
-
-if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
-  log "Stage 4: Compute WERs using sclite"
+if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
+  log "Stage 2: Compute WERs using sclite"
   for part in dev test; do
-    scoring_dir=${exp_dir}/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
+    scoring_dir=${exp_dir}/${decoding_method}-full/${part}_chunk${chunk}_extra${extra}_scoring
     mkdir -p $scoring_dir
-    cat $scoring_dir/hyp.ctm | python local/join_suffix_ctm.py > $scoring_dir/hyp_score.ctm
-    cat download/tedlium3/legacy/$part/stm/*.stm | python local/join_suffix_stm.py > $scoring_dir/ref.stm
-    sclite -r $scoring_dir/ref.stm stm -h $scoring_dir/hyp_score.ctm ctm \
+    cat download/tedlium3/legacy/$part/stm/*.stm | awk '{$2 = "0"; print}' | python local/join_suffix_stm.py > $scoring_dir/ref.stm
+    cat ${exp_dir}/${decoding_method}-full/${part}_full.ctm > $scoring_dir/hyp.ctm
+    sclite -r $scoring_dir/ref.stm stm -h ${scoring_dir}/hyp.ctm ctm \
       -O $scoring_dir -o all
-    grep "Sum/Avg" $scoring_dir/hyp_score.ctm.sys 
-  done
-fi
-
-exit 1
-# The following is deprecated.
-if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
-  log "Stage 4: Compute WERs"
-  for part in dev test; do
-    scoring_dir=${exp_dir}/${decoding_method}-chunked/${part}_chunk${chunk}_extra${extra}_scoring
-    mkdir -p $scoring_dir
-    cat $scoring_dir/hyp.ctm | python local/join_suffix_ctm.py > $scoring_dir/hyp_score.ctm
-    for pause in 0.0 0.2 0.5; do
-      log "split: $part pause: $pause"
-      scoring_dir_pause=${scoring_dir}/pause${pause}
-      mkdir -p $scoring_dir_pause
-      cat download/tedlium_ctm/${part}.ctm | python local/ctm_to_stm.py --max-pause $pause > $scoring_dir_pause/ref.stm
-      sclite -r $scoring_dir_pause/ref.stm stm -h $scoring_dir/hyp_score.ctm ctm \
-        -O $scoring_dir_pause -o all
-      grep "Sum/Avg" $scoring_dir_pause/hyp_score.ctm.sys 
-    done
+    grep "Sum/Avg" $scoring_dir/hyp.ctm.sys 
   done
 fi

@@ -41,7 +41,6 @@ Usage:
 import argparse
 import logging
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -54,23 +53,35 @@ from beam_search import (
     beam_search,
     fast_beam_search_one_best,
     fast_beam_search_nbest,
+    fast_beam_search_nbest_LG,
     greedy_search,
     greedy_search_batch,
     modified_beam_search,
 )
-from train import add_model_arguments, get_params, get_transducer_model
+from train import (
+    add_model_arguments,
+    get_params,
+    get_model,
+)
 
-from icefall.checkpoint import average_checkpoints, find_checkpoints, load_checkpoint
+from icefall.checkpoint import (
+    average_checkpoints,
+    average_checkpoints_with_averaged_model,
+    find_checkpoints,
+    load_checkpoint,
+)
+from icefall.lexicon import Lexicon
 from icefall.utils import (
     AttributeDict,
     convert_timestamp,
     make_pad_mask,
     setup_logger,
+    store_transcripts,
+    str2bool,
+    write_error_stats,
 )
-from lhotse import CutSet
-from lhotse.cut import Cut
+from lhotse.cut import CutSet
 from lhotse.supervision import AlignmentItem
-from lhotse.serialization import SequentialJsonlWriter
 from lhotse.utils import LOG_EPSILON
 
 
@@ -122,10 +133,28 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--use-averaged-model",
+        type=str2bool,
+        default=True,
+        help="Whether to load averaged model. Currently it only supports "
+        "using --epoch. If True, it would decode with the averaged model "
+        "over the epoch range from `epoch-avg` (excluded) to `epoch`."
+        "Actually only the models with epoch number of `epoch-avg` and "
+        "`epoch` are loaded for averaging. ",
+    )
+
+    parser.add_argument(
         "--exp-dir",
         type=str,
         default="zipformer/exp",
         help="The experiment dir",
+    )
+
+    parser.add_argument(
+        "--lang-dir",
+        type=Path,
+        default="data/lang_bpe_500",
+        help="The lang dir containing word table and LG graph",
     )
 
     parser.add_argument(
@@ -168,9 +197,29 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--ngram-lm-scale",
+        type=float,
+        default=0.01,
+        help="""
+        Used only when --decoding_method is fast_beam_search_nbest_LG.
+        It specifies the scale for n-gram LM scores.
+        """,
+    )
+
+    parser.add_argument(
+        "--ilme-scale",
+        type=float,
+        default=0.0,
+        help="""
+        Used only when --decoding_method is fast_beam_search_LG.
+        It specifies the scale for the internal language model estimation.
+        """,
+    )
+
+    parser.add_argument(
         "--max-contexts",
         type=int,
-        default=4,
+        default=8,
         help="""Used only when --decoding-method is
         fast_beam_search""",
     )
@@ -178,7 +227,7 @@ def get_parser():
     parser.add_argument(
         "--max-states",
         type=int,
-        default=8,
+        default=64,
         help="""Used only when --decoding-method is
         fast_beam_search""",
     )
@@ -244,6 +293,7 @@ def decode_one_batch(
     """
     device = next(model.parameters()).device
     feature = batch["inputs"]
+    cuts = batch["supervisions"]["cut"]
     assert feature.ndim == 3
 
     feature = feature.to(device)
@@ -270,7 +320,11 @@ def decode_one_batch(
     encoder_out, encoder_out_lens = model.encoder(x, x_lens, src_key_padding_mask)
     encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
 
-    if params.decoding_method == "fast_beam_search":
+    flag = False
+    if (
+        params.decoding_method == "fast_beam_search"
+        or params.decoding_method == "fast_beam_search_1best_HP"
+    ):
         res = fast_beam_search_one_best(
             model=model,
             decoding_graph=decoding_graph,
@@ -282,7 +336,25 @@ def decode_one_batch(
             allow_partial=True,
             return_timestamps=True,
         )
-    elif params.decoding_method == "fast_beam_search_nbest":
+    elif params.decoding_method == "fast_beam_search_nbest_LG":
+        res = fast_beam_search_nbest_LG(
+            model=model,
+            decoding_graph=decoding_graph,
+            encoder_out=encoder_out,
+            encoder_out_lens=encoder_out_lens,
+            beam=params.beam,
+            max_contexts=params.max_contexts,
+            max_states=params.max_states,
+            num_paths=params.num_paths,
+            nbest_scale=params.nbest_scale,
+            ilme_scale=params.ilme_scale,
+            allow_partial=True,
+            return_timestamps=True,
+        )
+    elif (
+        params.decoding_method == "fast_beam_search_nbest"
+        or params.decoding_method == "fast_beam_search_nbest_HP"
+    ):
         res = fast_beam_search_nbest(
             model=model,
             decoding_graph=decoding_graph,
@@ -312,6 +384,7 @@ def decode_one_batch(
             return_timestamps=True,
         )
     else:
+        flag = True
         batch_size = encoder_out.size(0)
         res = []
 
@@ -343,29 +416,37 @@ def decode_one_batch(
     timestamps = []
     scores = []
     for i in range(feature.shape[0]):
-        hyps.append(res.hyps[i])
-        timestamps.append(
-            convert_timestamp(res.timestamps[i], params.subsampling_factor)
-        )
+        if flag:
+            hyps.append(res[i].hyps)
+            timestamps.append(
+                convert_timestamp(res[i].timestamps, params.subsampling_factor)
+            )
+        else:
+            hyps.append(res.hyps[i])
+            timestamps.append(
+                convert_timestamp(res.timestamps[i], params.subsampling_factor)
+            )
         try:
             scores.append(res.scores[i])
-        except TypeError:
+        except TypeError or AttributeError:
             scores.append([0.0] * len(hyps[i]))
 
     return hyps, timestamps, scores
 
 
 def decode_dataset(
+    cuts_chunked: CutSet,
     dl: torch.utils.data.DataLoader,
     params: AttributeDict,
     model: nn.Module,
     sp: spm.SentencePieceProcessor,
     decoding_graph: Optional[k2.Fsa] = None,
-    cuts_writer: SequentialJsonlWriter = None,
-) -> None:
+) -> Dict[str, List[Tuple[str, List[str], List[str]]]]:
     """Decode dataset.
 
     Args:
+      cuts_chunked:
+        The cut set with chunks.
       dl:
         PyTorch's dataloader containing the dataset to decode.
       params:
@@ -380,49 +461,122 @@ def decode_dataset(
       cuts_writer:
         If not None, it is used to write the cuts with the decoding result.
     """
-    #  Background worker to add alignemnt and save cuts to disk.
-    def _save_worker(
-        cuts: List[Cut],
-        hyps: List[List[str]],
-        timestamps: List[List[float]],
-        scores: List[List[float]],
-    ):
-        for cut, symbol_list, time_list, score_list in zip(
-            cuts, hyps, timestamps, scores
-        ):
-            symbol_list = sp.id_to_piece(symbol_list)
-            ali = [
-                AlignmentItem(symbol=symbol, start=start, duration=None, score=score)
-                for symbol, start, score in zip(symbol_list, time_list, score_list)
-                if sp.piece_to_id(symbol) != params.unk_id
-            ]
-            assert len(cut.supervisions) == 1, len(cut.supervisions)
-            cut.supervisions[0].alignment = {"symbol": ali}
-            cuts_writer.write(cut, flush=True)
-
     num_cuts = 0
-    log_interval = 10
-    futures = []
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        # We only want one background worker so that serialization is deterministic.
 
-        for batch_idx, batch in enumerate(dl):
-            cuts = batch["supervisions"]["cut"]
+    try:
+        num_batches = len(dl)
+    except TypeError:
+        num_batches = "?"
 
-            hyps, timestamps, scores = decode_one_batch(
-                params=params,
-                model=model,
-                decoding_graph=decoding_graph,
-                batch=batch,
-            )
+    if params.decoding_method == "greedy_search":
+        log_interval = 50
+    else:
+        log_interval = 20
 
-            futures.append(
-                executor.submit(_save_worker, cuts, hyps, timestamps, scores)
-            )
+    # First we compute the hyp tokens for all chunks.
+    logging.info("Computing encoder representations for all chunks")
+    hyp_tokens = {}
+    for batch_idx, batch in enumerate(dl):
+        cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
+        hyps, timestamps, scores = decode_one_batch(
+            params=params,
+            model=model,
+            decoding_graph=decoding_graph,
+            batch=batch,
+        )
+        for cut_id, hyp, timestamp in zip(cut_ids, hyps, timestamps):
+            token_alis = [
+                AlignmentItem(
+                    symbol=symbol,
+                    start=start,
+                    duration=min(0.2, round(timestamp[i + 1] - start, 2))
+                    if i < len(timestamp) - 1
+                    else 0.2,
+                    score=None,
+                )
+                for i, (symbol, start) in enumerate(zip(hyp, timestamp))
+            ]
+            hyp_tokens[cut_id] = token_alis
 
-            num_cuts += len(cuts)
-            if batch_idx % log_interval == 0:
-                logging.info(f"cuts processed until now is {num_cuts}")
+        num_cuts += len(batch["inputs"])
+
+        if batch_idx % log_interval == 0:
+            batch_str = f"{batch_idx}/{num_batches}"
+
+            logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
+
+    def _sorting_key(k):
+        cut_id, chunk_idx = k.rsplit("-", 1)
+        return (cut_id, int(chunk_idx))
+
+    # Next, we combine the outputs for all the chunks of the same utterance. We iterate
+    # over the sorted keys so that chunks are ordered by time.
+    hyp_per_utt = defaultdict(list)
+    for k in sorted(hyp_tokens, key=_sorting_key):
+        cut_id = k.rsplit("-", 1)[0]
+        cut = cuts_chunked[k]
+        token_alis = hyp_tokens[k]
+        # Remove the parts from both end corresponding to the "extra" padding.
+        left = params.extra if cut.start > 0 else 0
+        right = (
+            cut.duration - params.extra
+            if cut.end < cut.recording.duration
+            else cut.duration
+        )
+        token_alis = [ali for ali in token_alis if left <= ali.start < right]
+        hyp_per_utt[cut_id] += token_alis
+
+    results = {}
+    for cut_id in hyp_per_utt:
+        token_alis = hyp_per_utt[cut_id]
+        tokens = [ali.symbol for ali in token_alis]
+        text = sp.decode(tokens)
+        results[cut_id] = (cut_id, text)
+
+    return results
+
+
+def save_results(
+    cuts_full: CutSet,
+    params: AttributeDict,
+    test_set_name: str,
+    results_dict: Dict[str, Tuple[str, str]],
+):
+    test_set_wers = dict()
+    results = []
+    for key, res in results_dict.items():
+        cut = cuts_full[key]
+        _, hyp_text = res
+        ref_text = " ".join(s.text for s in cut.supervisions)
+        results.append((key, ref_text.split(), hyp_text.split()))
+
+    recog_path = params.res_dir / f"recogs-{test_set_name}-{params.suffix}.txt"
+    results = sorted(results, key=lambda x: x[0])
+    store_transcripts(filename=recog_path, texts=results)
+    logging.info(f"The transcripts are stored in {recog_path}")
+
+    # The following prints out WERs, per-word error statistics and aligned
+    # ref/hyp pairs.
+    errs_filename = params.res_dir / f"errs-{test_set_name}-{params.suffix}.txt"
+    with open(errs_filename, "w") as f:
+        wer = write_error_stats(f, f"{test_set_name}", results, enable_log=True)
+        test_set_wers[test_set_name] = wer
+
+    logging.info("Wrote detailed error stats to {}".format(errs_filename))
+
+    test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
+    errs_info = params.res_dir / f"wer-summary-{test_set_name}-{params.suffix}.txt"
+    with open(errs_info, "w") as f:
+        print("settings\tWER", file=f)
+        for key, val in test_set_wers:
+            print("{}\t{}".format(key, val), file=f)
+
+    s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
+    note = "\tbest for {}".format(test_set_name)
+    for key, val in test_set_wers:
+        s += "{}\t{}{}\n".format(key, val, note)
+        note = ""
+    logging.info(s)
 
 
 @torch.no_grad()
@@ -439,7 +593,10 @@ def main():
         "greedy_search",
         "beam_search",
         "fast_beam_search",
+        "fast_beam_search_1best_HP",
         "fast_beam_search_nbest",
+        "fast_beam_search_nbest_HP",
+        "fast_beam_search_nbest_LG",
         "modified_beam_search",
     )
     params.res_dir = params.exp_dir / f"{params.decoding_method}-chunked"
@@ -453,11 +610,19 @@ def main():
         params.suffix += f"-beam-{params.beam}"
         params.suffix += f"-max-contexts-{params.max_contexts}"
         params.suffix += f"-max-states-{params.max_states}"
+        if "nbest" in params.decoding_method:
+            params.suffix += f"-nbest-scale-{params.nbest_scale}"
+            params.suffix += f"-num-paths-{params.num_paths}"
+            if "LG" in params.decoding_method or "HP" in params.decoding_method:
+                params.suffix += f"-ngram-lm-scale-{params.ngram_lm_scale}"
     elif "beam_search" in params.decoding_method:
         params.suffix += f"-beam-{params.beam_size}"
     else:
         params.suffix += f"-context-{params.context_size}"
         params.suffix += f"-max-sym-per-frame-{params.max_sym_per_frame}"
+
+    if params.use_averaged_model:
+        params.suffix += "-use-averaged-model"
 
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
     logging.info("Decoding started")
@@ -479,44 +644,116 @@ def main():
     logging.info(params)
 
     logging.info("About to create model")
-    model = get_transducer_model(params)
+    model = get_model(params)
 
-    if params.iter > 0:
-        filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
-            : params.avg
-        ]
-        if len(filenames) == 0:
-            raise ValueError(
-                f"No checkpoints found for --iter {params.iter}, --avg {params.avg}"
-            )
-        elif len(filenames) < params.avg:
-            raise ValueError(
-                f"Not enough checkpoints ({len(filenames)}) found for"
-                f" --iter {params.iter}, --avg {params.avg}"
-            )
-        logging.info(f"averaging {filenames}")
-        model.to(device)
-        model.load_state_dict(average_checkpoints(filenames, device=device))
-    elif params.avg == 1:
-        load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
+    if not params.use_averaged_model:
+        if params.iter > 0:
+            filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
+                : params.avg
+            ]
+            if len(filenames) == 0:
+                raise ValueError(
+                    f"No checkpoints found for"
+                    f" --iter {params.iter}, --avg {params.avg}"
+                )
+            elif len(filenames) < params.avg:
+                raise ValueError(
+                    f"Not enough checkpoints ({len(filenames)}) found for"
+                    f" --iter {params.iter}, --avg {params.avg}"
+                )
+            logging.info(f"averaging {filenames}")
+            model.to(device)
+            model.load_state_dict(average_checkpoints(filenames, device=device))
+        elif params.avg == 1:
+            load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
+            model.to(device)
+        else:
+            start = params.epoch - params.avg + 1
+            filenames = []
+            for i in range(start, params.epoch + 1):
+                if start >= 0:
+                    filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
+            logging.info(f"averaging {filenames}")
+            model.to(device)
+            model.load_state_dict(average_checkpoints(filenames, device=device))
     else:
-        start = params.epoch - params.avg + 1
-        filenames = []
-        for i in range(start, params.epoch + 1):
-            if start >= 0:
-                filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
-        logging.info(f"averaging {filenames}")
-        model.to(device)
-        model.load_state_dict(average_checkpoints(filenames, device=device))
+        if params.iter > 0:
+            filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
+                : params.avg + 1
+            ]
+            if len(filenames) == 0:
+                raise ValueError(
+                    f"No checkpoints found for"
+                    f" --iter {params.iter}, --avg {params.avg}"
+                )
+            elif len(filenames) < params.avg + 1:
+                raise ValueError(
+                    f"Not enough checkpoints ({len(filenames)}) found for"
+                    f" --iter {params.iter}, --avg {params.avg}"
+                )
+            filename_start = filenames[-1]
+            filename_end = filenames[0]
+            logging.info(
+                "Calculating the averaged model over iteration checkpoints"
+                f" from {filename_start} (excluded) to {filename_end}"
+            )
+            model.to(device)
+            model.load_state_dict(
+                average_checkpoints_with_averaged_model(
+                    filename_start=filename_start,
+                    filename_end=filename_end,
+                    device=device,
+                )
+            )
+        else:
+            assert params.avg > 0, params.avg
+            start = params.epoch - params.avg
+            assert start >= 1, start
+            filename_start = f"{params.exp_dir}/epoch-{start}.pt"
+            filename_end = f"{params.exp_dir}/epoch-{params.epoch}.pt"
+            logging.info(
+                f"Calculating the averaged model over epoch range from "
+                f"{start} (excluded) to {params.epoch}"
+            )
+            model.to(device)
+            model.load_state_dict(
+                average_checkpoints_with_averaged_model(
+                    filename_start=filename_start,
+                    filename_end=filename_end,
+                    device=device,
+                )
+            )
 
     model.to(device)
     model.eval()
     model.device = device
 
     if "fast_beam_search" in params.decoding_method:
-        decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
+        if params.decoding_method == "fast_beam_search_nbest_LG":
+            lexicon = Lexicon(params.lang_dir)
+            word_table = lexicon.word_table
+            lg_filename = params.lang_dir / "LG.pt"
+            logging.info(f"Loading {lg_filename}")
+            decoding_graph = k2.Fsa.from_dict(
+                torch.load(lg_filename, map_location=device)
+            )
+            decoding_graph.scores *= params.ngram_lm_scale
+        elif (
+            params.decoding_method == "fast_beam_search_nbest_HP"
+            or params.decoding_method == "fast_beam_search_1best_HP"
+        ):
+            hp_filename = params.lang_dir / "HP.pt"
+            decoding_graph = k2.Fsa.from_dict(
+                torch.load(hp_filename, map_location=device)
+            )
+            decoding_graph.scores *= params.ngram_lm_scale
+            word_table = None
+        else:
+            decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
+            word_table = None
     else:
         decoding_graph = None
+        word_table = None
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -525,29 +762,48 @@ def main():
     args.return_cuts = True
     tedlium = TedLiumAsrDataModule(args)
 
-    affix = f"_chunk{int(params.chunk)}_extra{int(params.extra)}"
-    dev_cuts = tedlium.dev_cuts(affix=affix)
-    test_cuts = tedlium.test_cuts(affix=affix)
-
-    dev_dl = tedlium.test_dataloaders(dev_cuts, chunked=True)
-    test_dl = tedlium.test_dataloaders(test_cuts, chunked=True)
-
-    test_sets = [f"dev{affix}", f"test{affix}"]
-    test_dls = [dev_dl, test_dl]
-
-    for name, dl in zip(test_sets, test_dls):
-        cuts_writer = CutSet.open_writer(
-            f"{params.res_dir}/cuts_{name}.jsonl.gz", overwrite=True
+    def _chunk_cuts(cuts: CutSet) -> CutSet:
+        cuts = cuts.cut_into_windows(duration=params.chunk)
+        cuts = cuts.extend_by(
+            params.extra, direction="both", pad_silence=False, preserve_id=True
         )
-        decode_dataset(
+        # Remove existing supervisions and add empty ones.
+        cuts = cuts.drop_supervisions()
+        cuts = cuts.fill_supervisions()
+        return cuts
+
+    dev_full = tedlium.dev_cuts(affix="_lf").to_eager()
+    test_full = tedlium.test_cuts(affix="_lf").to_eager()
+
+    dev_chunked = _chunk_cuts(dev_full).to_eager()
+    test_chunked = _chunk_cuts(test_full).to_eager()
+
+    dev_dl = tedlium.test_dataloaders(dev_chunked, chunked=True)
+    test_dl = tedlium.test_dataloaders(test_chunked, chunked=True)
+
+    test_sets = [f"dev_lf", f"test_lf"]
+    test_dls = [dev_dl, test_dl]
+    test_cuts_full = [dev_full, test_full]
+    test_cuts_chunked = [dev_chunked, test_chunked]
+
+    for name, dl, cuts_full, cuts_chunked in zip(
+        test_sets, test_dls, test_cuts_full, test_cuts_chunked
+    ):
+        results_dict = decode_dataset(
+            cuts_chunked=cuts_chunked,
             dl=dl,
             params=params,
             model=model,
             sp=sp,
             decoding_graph=decoding_graph,
-            cuts_writer=cuts_writer,
         )
-        cuts_writer.close()
+
+        save_results(
+            cuts_full=cuts_full,
+            params=params,
+            test_set_name=f"{name}_full",
+            results_dict=results_dict,
+        )
 
     logging.info("Done!")
 

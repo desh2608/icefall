@@ -56,7 +56,7 @@ def prepare_transcripts(input_text_path: Path, output_text_path: Path) -> None:
       Saved text file in output_text_path.
     """
 
-    foreign_chr_check = re.compile(r"[^a-z']")
+    foreign_chr_check = re.compile(r"[^a-zA-Z0-9']")
 
     logging.info(f"Loading {input_text_path.name}")
     with open(input_text_path, "r", encoding="utf8") as f:

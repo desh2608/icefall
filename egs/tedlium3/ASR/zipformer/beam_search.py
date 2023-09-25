@@ -59,7 +59,7 @@ def fast_beam_search_one_best(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -93,10 +93,7 @@ def fast_beam_search_one_best(
         temperature=temperature,
         ilme_scale=ilme_scale,
         allow_partial=allow_partial,
-<<<<<<< HEAD
-=======
         blank_penalty=blank_penalty,
->>>>>>> db71b0302651d0fd6d0e1c742591f35f2ab224ac
     )
 
     best_path = one_best_decoding(lattice)
@@ -136,7 +133,7 @@ def fast_beam_search_nbest_LG(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -177,11 +174,8 @@ def fast_beam_search_nbest_LG(
         max_contexts=max_contexts,
         temperature=temperature,
         allow_partial=allow_partial,
-<<<<<<< HEAD
-=======
         blank_penalty=blank_penalty,
         ilme_scale=ilme_scale,
->>>>>>> db71b0302651d0fd6d0e1c742591f35f2ab224ac
     )
 
     nbest = Nbest.from_lattice(
@@ -270,7 +264,7 @@ def fast_beam_search_nbest(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -365,7 +359,7 @@ def fast_beam_search_nbest_oracle(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -410,10 +404,7 @@ def fast_beam_search_nbest_oracle(
         max_contexts=max_contexts,
         temperature=temperature,
         allow_partial=allow_partial,
-<<<<<<< HEAD
-=======
         blank_penalty=blank_penalty,
->>>>>>> db71b0302651d0fd6d0e1c742591f35f2ab224ac
     )
 
     nbest = Nbest.from_lattice(
@@ -457,19 +448,17 @@ def fast_beam_search(
     max_states: int,
     max_contexts: int,
     temperature: float = 1.0,
-    subtract_ilme: bool = False,
     ilme_scale: float = 0.1,
     allow_partial: bool = False,
-<<<<<<< HEAD
-=======
     blank_penalty: float = 0.0,
->>>>>>> db71b0302651d0fd6d0e1c742591f35f2ab224ac
+    requires_grad: bool = False,
+    return_frameidx_on_arcs: bool = False,
 ) -> k2.Fsa:
     """It limits the maximum number of symbols per frame to 1.
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -485,6 +474,12 @@ def fast_beam_search(
         Max contexts pre stream per frame.
       temperature:
         Softmax temperature.
+      requires_grad:
+        If true, make the lattice differentiable by tracking the scores on the arcs.
+      return_timestamp_on_arc:
+        If true, an additional attribute `timestamp` will be returned on the lattice.
+      frame_shift:
+        Frame shift (in seconds) for the timestamps.
     Returns:
       Return an FsaVec with axes [utt][state][arc] containing the decoded
       lattice. Note: When the input graph is a TrivialGraph, the returned
@@ -505,11 +500,17 @@ def fast_beam_search(
         max_states=max_states,
     )
     individual_streams = []
-    for i in range(B):
+    for _ in range(B):
         individual_streams.append(k2.RnntDecodingStream(decoding_graph))
     decoding_streams = k2.RnntDecodingStreams(individual_streams, config)
 
     encoder_out = model.joiner.encoder_proj(encoder_out)
+
+    log_probs_list = []
+    t2stream_row_splits = [0]
+    stream2context_row_splits = [0]
+    num_log_probs = 0
+    frame_idx_list = []
 
     for t in range(T):
         # shape is a RaggedShape of shape (B, context)
@@ -553,11 +554,45 @@ def fast_beam_search(
             ilme_log_probs = (ilme_logits / temperature).log_softmax(dim=-1)
             log_probs -= ilme_scale * ilme_log_probs
 
+        log_probs_list.append(log_probs)
+        t2stream_row_splits += [shape.tot_size(0) + t2stream_row_splits[-1]]
+        stream2context_row_splits += (shape.row_splits(1) + num_log_probs)[1:].tolist()
+        num_log_probs = stream2context_row_splits[-1]
+        frame_idx_list.append(torch.full_like(log_probs, t, dtype=torch.int32))
         decoding_streams.advance(log_probs)
+
     decoding_streams.terminate_and_flush_to_streams()
-    lattice = decoding_streams.format_output(
-        encoder_out_lens.tolist(), allow_partial=allow_partial
-    )
+    if not requires_grad:
+        lattice = decoding_streams.format_output(
+            encoder_out_lens.tolist(), allow_partial=allow_partial
+        )
+    else:
+        log_probs = torch.cat(log_probs_list)
+        frame_idx = torch.cat(frame_idx_list)
+        t2s_shape = k2.ragged.create_ragged_shape2(
+            row_splits=torch.tensor(
+                t2stream_row_splits,
+                dtype=torch.int32,
+                device=current_encoder_out.device,
+            )
+        )
+        s2c_shape = k2.ragged.create_ragged_shape2(
+            row_splits=torch.tensor(
+                stream2context_row_splits,
+                dtype=torch.int32,
+                device=current_encoder_out.device,
+            )
+        )
+        t2stream2context_shape3 = t2s_shape.compose(s2c_shape).to(
+            current_encoder_out.device
+        )
+        lattice = decoding_streams.format_output(
+            encoder_out_lens.tolist(),
+            allow_partial=allow_partial,
+            log_probs=log_probs,
+            t2s2c_shape=t2stream2context_shape3,
+            frame_idx=frame_idx if return_frameidx_on_arcs else None,
+        )
 
     return lattice
 
@@ -572,7 +607,7 @@ def greedy_search(
     """Greedy search for a single utterance.
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       max_sym_per_frame:
@@ -676,7 +711,7 @@ def greedy_search_batch(
     """Greedy search in batch mode. It hardcodes --max-sym-per-frame=1.
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C), where N >= 1.
       encoder_out_lens:
@@ -979,7 +1014,7 @@ def modified_beam_search(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1186,7 +1221,7 @@ def modified_beam_search_lm_rescore(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1386,7 +1421,7 @@ def modified_beam_search_lm_rescore_LODR(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1600,7 +1635,7 @@ def _deprecated_modified_beam_search(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       beam:
@@ -1725,7 +1760,7 @@ def beam_search(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       beam:
@@ -1900,7 +1935,7 @@ def fast_beam_search_with_nbest_rescoring(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -2062,7 +2097,7 @@ def fast_beam_search_with_nbest_rnn_rescoring(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -2238,7 +2273,7 @@ def modified_beam_search_ngram_rescoring(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -2405,7 +2440,7 @@ def modified_beam_search_LODR(
     external language model.
 
     Args:
-        model (Transducer):
+        model (AsrModel):
             The transducer model
         encoder_out (torch.Tensor):
             Encoder output in (N,T,C)
@@ -2671,7 +2706,7 @@ def modified_beam_search_lm_shallow_fusion(
     """Modified_beam_search + NN LM shallow fusion
 
     Args:
-        model (Transducer):
+        model (AsrModel):
             The transducer model
         encoder_out (torch.Tensor):
             Encoder output in (N,T,C)

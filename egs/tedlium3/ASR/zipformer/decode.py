@@ -116,7 +116,12 @@ from beam_search import (
     greedy_search_batch,
     modified_beam_search,
 )
-from train import add_model_arguments, get_params, get_transducer_model
+from train import (
+    add_model_arguments,
+    display_and_save_batch,
+    get_params,
+    get_model,
+)
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -214,6 +219,7 @@ def get_parser():
           - fast_beam_search_nbest
           - fast_beam_search_nbest_oracle
           - fast_beam_search_nbest_LG
+          - fast_beam_search_nbest_HP
         If you use fast_beam_search_nbest_LG, you have to specify
         `--lang-dir`, which should contain `LG.pt`.
         """,
@@ -231,7 +237,7 @@ def get_parser():
     parser.add_argument(
         "--beam",
         type=float,
-        default=20.0,
+        default=8.0,
         help="""A floating point value to calculate the cutoff score during beam
         search (i.e., `cutoff = max-score - beam`), which is the same as the
         `beam` in Kaldi.
@@ -248,6 +254,16 @@ def get_parser():
         help="""
         Used only when --decoding_method is fast_beam_search_nbest_LG.
         It specifies the scale for n-gram LM scores.
+        """,
+    )
+
+    parser.add_argument(
+        "--ilme-scale",
+        type=float,
+        default=0.0,
+        help="""
+        Used only when --decoding_method is fast_beam_search_LG.
+        It specifies the scale for the internal language model estimation.
         """,
     )
 
@@ -299,6 +315,13 @@ def get_parser():
         help="""Scale applied to lattice scores when computing nbest paths.
         Used only when the decoding method is fast_beam_search_nbest,
         fast_beam_search_nbest_LG, and fast_beam_search_nbest_oracle""",
+    )
+
+    parser.add_argument(
+        "--debug",
+        type=str2bool,
+        default=False,
+        help="If true, it will only decode the first batch",
     )
 
     add_model_arguments(parser)
@@ -374,7 +397,6 @@ def decode_one_batch(
     encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
 
     hyps = []
-    unk = sp.decode(sp.unk_id()).strip()
 
     if params.decoding_method == "fast_beam_search":
         hyp_tokens = fast_beam_search_one_best(
@@ -388,8 +410,7 @@ def decode_one_batch(
             allow_partial=True,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyp = [w for w in hyp.split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(hyp.split())
     elif params.decoding_method == "fast_beam_search_nbest_LG":
         hyp_tokens = fast_beam_search_nbest_LG(
             model=model,
@@ -402,11 +423,15 @@ def decode_one_batch(
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
             allow_partial=True,
+            ilme_scale=params.ilme_scale,
         )
         for hyp in hyp_tokens:
-            hyp = [word_table[i] for i in hyp if word_table[i] != unk]
+            hyp = [word_table[i] for i in hyp]
             hyps.append(hyp)
-    elif params.decoding_method == "fast_beam_search_nbest":
+    elif (
+        params.decoding_method == "fast_beam_search_nbest"
+        or params.decoding_method == "fast_beam_search_nbest_HP"
+    ):
         hyp_tokens = fast_beam_search_nbest(
             model=model,
             decoding_graph=decoding_graph,
@@ -420,8 +445,7 @@ def decode_one_batch(
             allow_partial=True,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyp = [w for w in hyp.split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(hyp.split())
     elif params.decoding_method == "fast_beam_search_nbest_oracle":
         hyp_tokens = fast_beam_search_nbest_oracle(
             model=model,
@@ -437,8 +461,7 @@ def decode_one_batch(
             allow_partial=True,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyp = [w for w in hyp.split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(hyp.split())
     elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
         hyp_tokens = greedy_search_batch(
             model=model,
@@ -446,8 +469,7 @@ def decode_one_batch(
             encoder_out_lens=encoder_out_lens,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyp = [w for w in hyp.split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(hyp.split())
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -456,8 +478,7 @@ def decode_one_batch(
             beam=params.beam_size,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyp = [w for w in hyp.split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(hyp.split())
     else:
         batch_size = encoder_out.size(0)
 
@@ -481,8 +502,7 @@ def decode_one_batch(
                 raise ValueError(
                     f"Unsupported decoding method: {params.decoding_method}"
                 )
-            hyp = [w for w in sp.decode(hyp).split() if w != unk]
-            hyps.append(hyp)
+            hyps.append(sp.decode(hyp).split())
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -584,18 +604,14 @@ def save_results(
 ):
     test_set_wers = dict()
     for key, results in results_dict.items():
-        recog_path = (
-            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
+        recog_path = params.res_dir / f"recogs-{test_set_name}-{params.suffix}.txt"
         results = sorted(results)
         store_transcripts(filename=recog_path, texts=results)
         logging.info(f"The transcripts are stored in {recog_path}")
 
         # The following prints out WERs, per-word error statistics and aligned
         # ref/hyp pairs.
-        errs_filename = (
-            params.res_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
-        )
+        errs_filename = params.res_dir / f"errs-{test_set_name}-{params.suffix}.txt"
         with open(errs_filename, "w") as f:
             wer = write_error_stats(
                 f, f"{test_set_name}-{key}", results, enable_log=True
@@ -605,9 +621,7 @@ def save_results(
         logging.info("Wrote detailed error stats to {}".format(errs_filename))
 
     test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
-    errs_info = (
-        params.res_dir / f"wer-summary-{test_set_name}-{key}-{params.suffix}.txt"
-    )
+    errs_info = params.res_dir / f"wer-summary-{test_set_name}-{params.suffix}.txt"
     with open(errs_info, "w") as f:
         print("settings\tWER", file=f)
         for key, val in test_set_wers:
@@ -637,6 +651,7 @@ def main():
         "fast_beam_search",
         "fast_beam_search_nbest",
         "fast_beam_search_nbest_LG",
+        "fast_beam_search_nbest_HP",
         "fast_beam_search_nbest_oracle",
         "modified_beam_search",
     )
@@ -664,7 +679,7 @@ def main():
         if "nbest" in params.decoding_method:
             params.suffix += f"-nbest-scale-{params.nbest_scale}"
             params.suffix += f"-num-paths-{params.num_paths}"
-            if "LG" in params.decoding_method:
+            if "LG" in params.decoding_method or "HP" in params.decoding_method:
                 params.suffix += f"-ngram-lm-scale-{params.ngram_lm_scale}"
     elif "beam_search" in params.decoding_method:
         params.suffix += f"-{params.decoding_method}-beam-size-{params.beam_size}"
@@ -695,7 +710,7 @@ def main():
     logging.info(params)
 
     logging.info("About to create model")
-    model = get_transducer_model(params)
+    model = get_model(params)
 
     if not params.use_averaged_model:
         if params.iter > 0:
@@ -717,6 +732,7 @@ def main():
             model.load_state_dict(average_checkpoints(filenames, device=device))
         elif params.avg == 1:
             load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
+            model.to(device)
         else:
             start = params.epoch - params.avg + 1
             filenames = []
@@ -787,6 +803,13 @@ def main():
                 torch.load(lg_filename, map_location=device)
             )
             decoding_graph.scores *= params.ngram_lm_scale
+        elif params.decoding_method == "fast_beam_search_nbest_HP":
+            hp_filename = params.lang_dir / "HP.pt"
+            decoding_graph = k2.Fsa.from_dict(
+                torch.load(hp_filename, map_location=device)
+            )
+            decoding_graph.scores *= params.ngram_lm_scale
+            word_table = None
         else:
             word_table = None
             decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)

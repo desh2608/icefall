@@ -44,6 +44,10 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3"
   --full-libri 1 \
   --max-duration 1000
 
+It supports training with:
+  - transducer loss (default), with `--use-transducer True --use-ctc False`
+  - ctc loss (not recommended), with `--use-transducer False --use-ctc True`
+  - transducer loss & ctc loss, with `--use-transducer True --use-ctc True`
 """
 
 
@@ -67,8 +71,7 @@ from joiner import Joiner
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from local.convert_transcript_words_to_bpe_ids import convert_texts_into_ids
-from model import Transducer
+from model import AsrModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -241,6 +244,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+    parser.add_argument(
+        "--use-transducer",
+        type=str2bool,
+        default=True,
+        help="If True, use Transducer head.",
+    )
+
+    parser.add_argument(
+        "--use-ctc",
+        type=str2bool,
+        default=False,
+        help="If True, use CTC head.",
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -271,7 +288,7 @@ def get_parser():
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=50,
+        default=30,
         help="Number of epochs to train.",
     )
 
@@ -305,6 +322,15 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--model-init-ckpt",
+        type=str,
+        default=None,
+        help="""The model checkpoint to initialize the model (either full or part).
+        If not specified, the model is randomly initialized.
+        """,
+    )
+
+    parser.add_argument(
         "--bpe-model",
         type=str,
         default="data/lang_bpe_500/bpe.model",
@@ -312,7 +338,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--base-lr", type=float, default=0.04, help="The base learning rate."
+        "--base-lr", type=float, default=0.045, help="The base learning rate."
     )
 
     parser.add_argument(
@@ -326,7 +352,7 @@ def get_parser():
     parser.add_argument(
         "--lr-epochs",
         type=float,
-        default=5,
+        default=3.5,
         help="""Number of epochs that affects how rapidly the learning rate decreases.
         """,
     )
@@ -355,13 +381,6 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--rnnt-type",
-        type=str,
-        default="regular",
-        choices=["regular", "modified", "constrained"],
-    )
-
-    parser.add_argument(
         "--lm-scale",
         type=float,
         default=0.25,
@@ -384,6 +403,13 @@ def get_parser():
         "loss(joiner is just addition), this simple loss also uses for"
         "training (as a regularization item). We will scale the simple loss"
         "with this parameter before adding to the final loss.",
+    )
+
+    parser.add_argument(
+        "--ctc-loss-scale",
+        type=float,
+        default=0.2,
+        help="Scale for CTC loss.",
     )
 
     parser.add_argument(
@@ -423,7 +449,7 @@ def get_parser():
     parser.add_argument(
         "--keep-last-k",
         type=int,
-        default=1,
+        default=30,
         help="""Only keep this number of checkpoints on disk.
         For instance, if it is 3, there are only 3 checkpoints
         in the exp-dir with filenames `checkpoint-xxx.pt`.
@@ -449,16 +475,6 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Whether to use half precision training.",
-    )
-
-    parser.add_argument(
-        "--delay-penalty",
-        type=float,
-        default=0.0,
-        help="""A constant value used to penalize symbol delay,
-        to encourage streaming models to emit symbols earlier.
-        See https://github.com/k2-fsa/k2/issues/955 and
-        https://arxiv.org/pdf/2211.00490.pdf for more details.""",
     )
 
     add_model_arguments(parser)
@@ -596,21 +612,33 @@ def get_joiner_model(params: AttributeDict) -> nn.Module:
     return joiner
 
 
-def get_transducer_model(params: AttributeDict) -> nn.Module:
+def get_model(params: AttributeDict) -> nn.Module:
+    assert params.use_transducer or params.use_ctc, (
+        f"At least one of them should be True, "
+        f"but got params.use_transducer={params.use_transducer}, "
+        f"params.use_ctc={params.use_ctc}"
+    )
+
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
-    decoder = get_decoder_model(params)
-    joiner = get_joiner_model(params)
 
-    model = Transducer(
+    if params.use_transducer:
+        decoder = get_decoder_model(params)
+        joiner = get_joiner_model(params)
+    else:
+        decoder = None
+        joiner = None
+
+    model = AsrModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
-        encoder_dim=int(max(params.encoder_dim.split(","))),
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         decoder_dim=params.decoder_dim,
-        joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
+        use_transducer=params.use_transducer,
+        use_ctc=params.use_ctc,
     )
     return model
 
@@ -739,7 +767,7 @@ def compute_loss(
     is_training: bool,
 ) -> Tuple[Tensor, MetricsTracker]:
     """
-    Compute RNNT loss given the model and its inputs.
+    Compute loss given the model and its inputs.
 
     Args:
       params:
@@ -767,39 +795,41 @@ def compute_loss(
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
-    warmup = batch_idx_train / warm_step
 
     texts = batch["supervisions"]["text"]
-    y = convert_texts_into_ids(texts, sp)
-    y = k2.RaggedTensor(y).to(device)
+    y = sp.encode(texts, out_type=int)
+    y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss = model(
+        simple_loss, pruned_loss, ctc_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
-            delay_penalty=params.delay_penalty if warmup >= 2.0 else 0,
-            rnnt_type=params.rnnt_type,
         )
 
-        s = params.simple_loss_scale
-        # take down the scale on the simple loss from 1.0 at the start
-        # to params.simple_loss scale by warm_step.
-        simple_loss_scale = (
-            s
-            if batch_idx_train >= warm_step
-            else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-        )
-        pruned_loss_scale = (
-            1.0
-            if batch_idx_train >= warm_step
-            else 0.1 + 0.9 * (batch_idx_train / warm_step)
-        )
+        loss = 0.0
 
-        loss = simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
+        if params.use_transducer:
+            s = params.simple_loss_scale
+            # take down the scale on the simple loss from 1.0 at the start
+            # to params.simple_loss scale by warm_step.
+            simple_loss_scale = (
+                s
+                if batch_idx_train >= warm_step
+                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
+            )
+            pruned_loss_scale = (
+                1.0
+                if batch_idx_train >= warm_step
+                else 0.1 + 0.9 * (batch_idx_train / warm_step)
+            )
+            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
+
+        if params.use_ctc:
+            loss += params.ctc_loss_scale * ctc_loss
 
     assert loss.requires_grad == is_training
 
@@ -810,8 +840,11 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["simple_loss"] = simple_loss.detach().cpu().item()
-    info["pruned_loss"] = pruned_loss.detach().cpu().item()
+    if params.use_transducer:
+        info["simple_loss"] = simple_loss.detach().cpu().item()
+        info["pruned_loss"] = pruned_loss.detach().cpu().item()
+    if params.use_ctc:
+        info["ctc_loss"] = ctc_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1092,10 +1125,13 @@ def run(rank, world_size, args):
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
 
+    if not params.use_transducer:
+        params.ctc_loss_scale = 1.0
+
     logging.info(params)
 
     logging.info("About to create model")
-    model = get_transducer_model(params)
+    model = get_model(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -1112,6 +1148,14 @@ def run(rank, world_size, args):
     )
 
     model.to(device)
+
+    if checkpoints is None and params.model_init_ckpt is not None:
+        logging.info(
+            f"Initializing model with checkpoint from {params.model_init_ckpt}"
+        )
+        init_ckpt = torch.load(params.model_init_ckpt, map_location=device)
+        model.load_state_dict(init_ckpt["model"], strict=True)
+
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
@@ -1148,7 +1192,7 @@ def run(rank, world_size, args):
     tedlium = TedLiumAsrDataModule(args)
 
     train_cuts = tedlium.train_cuts()
-    train_cuts = train_cuts.filter(lambda c: 1.0 <= c.duration <= 20.0)
+    train_cuts = train_cuts.filter(lambda c: c.duration > 0.1)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1164,14 +1208,14 @@ def run(rank, world_size, args):
     valid_cuts = tedlium.dev_cuts()
     valid_dl = tedlium.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:

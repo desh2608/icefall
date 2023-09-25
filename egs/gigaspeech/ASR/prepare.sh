@@ -40,6 +40,7 @@ num_per_split=50
 dl_dir=$PWD/download
 
 . shared/parse_options.sh || exit 1
+cmd="queue-freegpu.pl --config conf/gpu.conf --gpu 1 --mem 4G"
 
 # vocab size for sentence piece models.
 # It will generate data/lang_bpe_xxx,
@@ -140,7 +141,7 @@ fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   log "Stage 4: Compute features for DEV and TEST subsets of GigaSpeech (may take 2 minutes)"
-  python3 ./local/compute_fbank_gigaspeech_dev_test.py
+  $cmd exp/feats_200h_orig.log python local/compute_fbank_gigaspeech.py
 fi
 
 if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then

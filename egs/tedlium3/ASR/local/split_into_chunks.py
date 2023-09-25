@@ -80,7 +80,9 @@ def main():
 
         cuts = load_manifest(manifest_in)
         cuts = cuts.cut_into_windows(duration=args.chunk)
-        cuts = cuts.extend_by(args.extra, direction="both", pad_silence=False)
+        cuts = cuts.extend_by(
+            args.extra, direction="both", pad_silence=False, preserve_id=True
+        )
         # Remove existing supervisions and add empty ones.
         cuts = cuts.drop_supervisions()
         cuts = cuts.fill_supervisions()

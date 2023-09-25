@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import k2
 import sentencepiece as spm
 import torch
-from model import Transducer
+from model import AsrModel
 
 from icefall import NgramLm, NgramLmStateCost
 from icefall.decode import Nbest, one_best_decoding
@@ -39,7 +39,7 @@ from icefall.utils import (
 
 
 def fast_beam_search_one_best(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -58,7 +58,7 @@ def fast_beam_search_one_best(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -103,7 +103,7 @@ def fast_beam_search_one_best(
 
 
 def fast_beam_search_nbest_LG(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -128,7 +128,7 @@ def fast_beam_search_nbest_LG(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -229,7 +229,7 @@ def fast_beam_search_nbest_LG(
 
 
 def fast_beam_search_nbest(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -254,7 +254,7 @@ def fast_beam_search_nbest(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -319,7 +319,7 @@ def fast_beam_search_nbest(
 
 
 def fast_beam_search_nbest_oracle(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -345,7 +345,7 @@ def fast_beam_search_nbest_oracle(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -424,7 +424,7 @@ def fast_beam_search_nbest_oracle(
 
 
 def fast_beam_search(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -439,7 +439,7 @@ def fast_beam_search(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -523,7 +523,7 @@ def fast_beam_search(
 
 
 def greedy_search(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     max_sym_per_frame: int,
     return_timestamps: bool = False,
@@ -531,7 +531,7 @@ def greedy_search(
     """Greedy search for a single utterance.
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       max_sym_per_frame:
@@ -623,7 +623,7 @@ def greedy_search(
 
 
 def greedy_search_batch(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     return_timestamps: bool = False,
@@ -631,7 +631,7 @@ def greedy_search_batch(
     """Greedy search in batch mode. It hardcodes --max-sym-per-frame=1.
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C), where N >= 1.
       encoder_out_lens:
@@ -914,7 +914,7 @@ def get_hyps_shape(hyps: List[HypothesisList]) -> k2.RaggedShape:
 
 
 def modified_beam_search(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     beam: int = 4,
@@ -925,7 +925,7 @@ def modified_beam_search(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1083,7 +1083,7 @@ def modified_beam_search(
 
 
 def modified_beam_search_lm_rescore(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     LM: LmScorer,
@@ -1097,7 +1097,7 @@ def modified_beam_search_lm_rescore(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1281,7 +1281,7 @@ def modified_beam_search_lm_rescore(
 
 
 def modified_beam_search_lm_rescore_LODR(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     LM: LmScorer,
@@ -1297,7 +1297,7 @@ def modified_beam_search_lm_rescore_LODR(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -1497,7 +1497,7 @@ def modified_beam_search_lm_rescore_LODR(
 
 
 def _deprecated_modified_beam_search(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     beam: int = 4,
     return_timestamps: bool = False,
@@ -1511,7 +1511,7 @@ def _deprecated_modified_beam_search(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       beam:
@@ -1622,7 +1622,7 @@ def _deprecated_modified_beam_search(
 
 
 def beam_search(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     beam: int = 4,
     temperature: float = 1.0,
@@ -1631,11 +1631,11 @@ def beam_search(
     """
     It implements Algorithm 1 in https://arxiv.org/pdf/1211.3711.pdf
 
-    espnet/nets/beam_search_transducer.py#L247 is used as a reference.
+    espnet/nets/beam_search_AsrModel.py#L247 is used as a reference.
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       encoder_out:
         A tensor of shape (N, T, C) from the encoder. Support only N==1 for now.
       beam:
@@ -1782,7 +1782,7 @@ def beam_search(
 
 
 def fast_beam_search_with_nbest_rescoring(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -1807,7 +1807,7 @@ def fast_beam_search_with_nbest_rescoring(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -1942,7 +1942,7 @@ def fast_beam_search_with_nbest_rescoring(
 
 
 def fast_beam_search_with_nbest_rnn_rescoring(
-    model: Transducer,
+    model: AsrModel,
     decoding_graph: k2.Fsa,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
@@ -1969,7 +1969,7 @@ def fast_beam_search_with_nbest_rnn_rescoring(
 
     Args:
       model:
-        An instance of `Transducer`.
+        An instance of `AsrModel`.
       decoding_graph:
         Decoding graph used for decoding, may be a TrivialGraph or a LG.
       encoder_out:
@@ -2133,7 +2133,7 @@ def fast_beam_search_with_nbest_rnn_rescoring(
 
 
 def modified_beam_search_ngram_rescoring(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     ngram_lm: NgramLm,
@@ -2145,7 +2145,7 @@ def modified_beam_search_ngram_rescoring(
 
     Args:
       model:
-        The transducer model.
+        The AsrModel model.
       encoder_out:
         Output from the encoder. Its shape is (N, T, C).
       encoder_out_lens:
@@ -2297,7 +2297,7 @@ def modified_beam_search_ngram_rescoring(
 
 
 def modified_beam_search_LODR(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     LODR_lm: NgramLm,
@@ -2312,8 +2312,8 @@ def modified_beam_search_LODR(
     external language model.
 
     Args:
-        model (Transducer):
-            The transducer model
+        model (AsrModel):
+            The AsrModel model
         encoder_out (torch.Tensor):
             Encoder output in (N,T,C)
         encoder_out_lens (torch.Tensor):
@@ -2568,7 +2568,7 @@ def modified_beam_search_LODR(
 
 
 def modified_beam_search_lm_shallow_fusion(
-    model: Transducer,
+    model: AsrModel,
     encoder_out: torch.Tensor,
     encoder_out_lens: torch.Tensor,
     LM: LmScorer,
@@ -2578,8 +2578,8 @@ def modified_beam_search_lm_shallow_fusion(
     """Modified_beam_search + NN LM shallow fusion
 
     Args:
-        model (Transducer):
-            The transducer model
+        model (AsrModel):
+            The AsrModel model
         encoder_out (torch.Tensor):
             Encoder output in (N,T,C)
         encoder_out_lens (torch.Tensor):

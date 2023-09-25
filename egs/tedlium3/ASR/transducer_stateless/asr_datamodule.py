@@ -18,12 +18,20 @@
 
 import argparse
 import logging
-from functools import lru_cache
+import random
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
+from lhotse import (
+    CutSet,
+    Fbank,
+    FbankConfig,
+    SupervisionSegment,
+    load_manifest,
+    load_manifest_lazy,
+)
 from lhotse.cut import Cut
 from lhotse.dataset import (
     CutConcatenate,
@@ -37,6 +45,14 @@ from lhotse.dataset.input_strategies import (
     OnTheFlyFeatures,
     BatchIO,
     PrecomputedFeatures,
+)
+from lhotse.utils import (
+    TimeSpan,
+    Seconds,
+    compute_num_samples,
+    ifnone,
+    overlaps,
+    overspans,
 )
 from torch.utils.data import DataLoader
 
@@ -82,6 +98,66 @@ class SpeechRecognitionDataset(K2SpeechRecognitionDataset):
             batch["supervisions"]["cut"] = [cut for cut in cuts]
 
         return batch
+
+
+# The following is from: https://github.com/lhotse-speech/lhotse/discussions/1092#discussioncomment-6184497
+def sample_alignment_segment(
+    cut: Cut,
+    min_duration: Seconds,
+    max_duration: Seconds,
+    supervisions_index: Optional[Any] = None,
+    seed: Optional[int] = None,
+) -> Cut:
+    """
+    Given a cut that has possibly multiple supervisions with alignments,
+    create a sub-cut with a single supervision that may combine text from several supervisions.
+    We use the word-level alignment to determine output cut's transcript.
+    The output cut's duration is sampled uniformly between ``min_duration`` and ``max_duration``.
+
+    Example usage::
+
+        >>> cuts = CutSet.from_file(...)  # long cuts with multiple supervisions
+        >>> segment_cuts = cuts.repeat().map(sample_alignment_segment)  # infinite cut set of segments
+
+    """
+    if cut.duration < min_duration:
+        return cut
+
+    rng = random if seed is None else random.Random(seed)
+
+    def _quantize(dur: Seconds) -> Seconds:
+        # Avoid potential numerical issues later on
+        num_samples = compute_num_samples(dur, cut.sampling_rate)
+        return num_samples / cut.sampling_rate
+
+    start = _quantize(rng.random() * (cut.duration - min_duration))
+    duration = rng.uniform(min_duration, max_duration)
+
+    # ensure that cut end time is not exceeded
+    duration = min(duration, cut.duration - start)
+
+    alignment_items = []
+    trimmed = cut.truncate(
+        offset=start,
+        duration=duration,
+        keep_excessive_supervisions=True,
+        _supervisions_index=supervisions_index,
+    )
+    for s in trimmed.supervisions:
+        # collect all alignment items that fall within the segment
+        for ai in ifnone(s.alignment, {}).get("word", []):
+            if overlaps(TimeSpan(0, duration), ai):
+                alignment_items.append(ai)
+
+    supervision = SupervisionSegment(
+        id=trimmed.id,
+        recording_id=trimmed.recording_id,
+        start=0,
+        duration=duration,
+        text=" ".join(ai.symbol for ai in alignment_items),
+    )
+    trimmed.supervisions = [supervision]
+    return trimmed
 
 
 class TedLiumAsrDataModule:
@@ -147,6 +223,12 @@ class TedLiumAsrDataModule:
             default=False,
             help="When enabled, utterances (cuts) will be concatenated "
             "to minimize the amount of padding.",
+        )
+        group.add_argument(
+            "--uniform-duration",
+            type=float,
+            default=25.0,
+            help="Uniform segment duration used for dynamic training.",
         )
         group.add_argument(
             "--duration-factor",
@@ -215,9 +297,18 @@ class TedLiumAsrDataModule:
             help="When enabled, select noise from MUSAN and mix it"
             "with training dataset.",
         )
+        group.add_argument(
+            "--lf-affix",
+            type=str,
+            default=None,
+            help="Affix to add to the manifest name for long-form training",
+        )
 
     def train_dataloaders(
-        self, cuts_train: CutSet, sampler_state_dict: Optional[Dict[str, Any]] = None
+        self,
+        cuts_train: CutSet,
+        sampler_state_dict: Optional[Dict[str, Any]] = None,
+        prefetch_factor: Optional[int] = None,
     ) -> DataLoader:
         """
         Args:
@@ -324,6 +415,7 @@ class TedLiumAsrDataModule:
             sampler=train_sampler,
             batch_size=None,
             num_workers=self.args.num_workers,
+            prefetch_factor=prefetch_factor,
             persistent_workers=False,
         )
 
@@ -404,14 +496,52 @@ class TedLiumAsrDataModule:
     @lru_cache()
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "cuts_train.jsonl.gz")
+        lf_affix = f"_{self.args.lf_affix}" if self.args.lf_affix else ""
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"tedlium_cuts_train{lf_affix}.jsonl.gz"
+        )
+
+    @lru_cache()
+    def train_cuts_dynamic(
+        self, min_duration: Seconds = 1.0, max_duration: Seconds = 20.0
+    ) -> CutSet:
+        logging.info("About to get dynamically segmented train cuts (infinite)")
+        cuts = load_manifest_lazy(self.args.manifest_dir / "cuts_train_full.jsonl.gz")
+        supervisions_index = cuts.index_supervisions()
+        fn = partial(
+            sample_alignment_segment,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            supervisions_index=supervisions_index,
+        )
+        return cuts.repeat(preserve_id=True).map(fn)  # infinite cut set of segments
+
+    @lru_cache()
+    def train_cuts_uniform(self) -> CutSet:
+        logging.info("About to get uniformly segmented train cuts")
+        cuts = (
+            load_manifest_lazy(self.args.manifest_dir / "cuts_train_full.jsonl.gz")
+            .merge_supervisions(merge_policy="keep_first")
+            .trim_to_alignments(
+                type="word",
+                max_pause=2.0,
+                max_segment_duration=self.args.uniform_duration,
+            )
+            .shuffle()
+            .filter(lambda c: c.duration > 0.5)
+        )
+        return cuts
 
     @lru_cache()
     def dev_cuts(self, affix: str = "") -> CutSet:
         logging.info("About to get dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / f"cuts_dev{affix}.jsonl.gz")
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"tedlium_cuts_dev{affix}.jsonl.gz"
+        )
 
     @lru_cache()
     def test_cuts(self, affix: str = "") -> CutSet:
         logging.info("About to get test cuts")
-        return load_manifest_lazy(self.args.manifest_dir / f"cuts_test{affix}.jsonl.gz")
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"tedlium_cuts_test{affix}.jsonl.gz"
+        )

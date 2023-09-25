@@ -18,9 +18,12 @@
 
 import logging
 from pathlib import Path
+from tqdm import tqdm
 
 import torch
-from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
+import torchaudio
+from lhotse import CutSet, FeatureSet, KaldifeatFbank, KaldifeatFbankConfig
+from lhotse.recipes.utils import read_manifests_if_cached
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -28,17 +31,20 @@ from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
 # even when we are not invoking the main (e.g. when spawning subprocesses).
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
+torch.multiprocessing.set_sharing_strategy("file_system")
+torchaudio.set_audio_backend("soundfile")
 
 
 def compute_fbank_gigaspeech_dev_test():
-    in_out_dir = Path("data/fbank")
+    out_dir = Path("data/fbank")
+    src_dir = Path("data/manifests")
     # number of workers in dataloader
     num_workers = 20
 
     # number of seconds in a batch
-    batch_duration = 600
+    batch_duration = 2000
 
-    subsets = ("DEV", "TEST")
+    subsets = ["M"]
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
@@ -47,33 +53,35 @@ def compute_fbank_gigaspeech_dev_test():
 
     logging.info(f"device: {device}")
 
-    for partition in subsets:
-        cuts_path = in_out_dir / f"cuts_{partition}.jsonl.gz"
-        if cuts_path.is_file():
-            logging.info(f"{cuts_path} exists - skipping")
-            continue
+    # prefix = "gigaspeech"
+    # suffix = "jsonl.gz"
+    # manifests = read_manifests_if_cached(
+    #     dataset_parts=subsets,
+    #     output_dir=src_dir,
+    #     prefix=prefix,
+    #     suffix=suffix,
+    # )
+    # assert manifests is not None
 
-        raw_cuts_path = in_out_dir / f"cuts_{partition}_raw.jsonl.gz"
+    # for partition in subsets:
+    # cut_set = CutSet.from_manifests(**manifests[partition])
+    cut_set = CutSet.from_file(src_dir / f"gigaspeech_cuts_200h_new.jsonl.gz")
+    logging.info("Computing features")
+    cut_set = cut_set.compute_and_store_features_batch(
+        extractor=extractor,
+        storage_path=f"{out_dir}/feats_200h",
+        num_workers=num_workers,
+        batch_duration=batch_duration,
+        overwrite=True,
+    )
 
-        logging.info(f"Loading {raw_cuts_path}")
-        cut_set = CutSet.from_file(raw_cuts_path)
+    cut_set.to_file(src_dir / f"gigaspeech_cuts_200h.jsonl.gz")
 
-        logging.info("Computing features")
-
-        cut_set = cut_set.compute_and_store_features_batch(
-            extractor=extractor,
-            storage_path=f"{in_out_dir}/feats_{partition}",
-            num_workers=num_workers,
-            batch_duration=batch_duration,
-            overwrite=True,
-        )
-        cut_set = cut_set.trim_to_supervisions(
-            keep_overlapping=False, min_duration=None
-        )
-
-        logging.info(f"Saving to {cuts_path}")
-        cut_set.to_file(cuts_path)
-        logging.info(f"Saved to {cuts_path}")
+    # with FeatureSet.open_writer(
+    #     src_dir / f"gigaspeech_feats_{partition}.jsonl.gz"
+    # ) as f:
+    #     for cut in tqdm(cut_set):
+    #         f.write(cut.features)
 
 
 def main():

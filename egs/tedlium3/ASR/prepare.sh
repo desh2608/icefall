@@ -83,7 +83,15 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     # We assume that you have downloaded the tedlium3 corpus
     # to $dl_dir/tedlium3
     mkdir -p data/manifests
-    lhotse prepare tedlium $dl_dir/tedlium3 data/manifests
+    lhotse prepare tedlium --normalize-text kaldi -j 4 $dl_dir/tedlium3 data/manifests
+
+    for part in train dev test; do
+      lhotse supervision with-alignment-from-ctm --verbose \
+        --ctm-file download/tedlium_ctm/${part}.ctm \
+        data/manifests/tedlium_supervisions_${part}.jsonl.gz \
+        data/manifests/tedlium_supervisions_${part}_new.jsonl.gz
+      mv data/manifests/tedlium_supervisions_${part}_new.jsonl.gz data/manifests/tedlium_supervisions_${part}.jsonl.gz
+    done
     touch data/manifests/.tedlium3.done
   fi
 fi
@@ -125,84 +133,137 @@ fi
 
 if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
   log "Stage 5: Prepare BPE train data and set of words"
-  lang_dir=data/lang
+  lang_dir=data/lang_bpe_500
   mkdir -p $lang_dir
 
-  if [ ! -f $lang_dir/train.txt ]; then
-    gunzip -c $dl_dir/tedlium3/LM/*.en.gz | sed 's: <\/s>::g' > $lang_dir/train_orig.txt
+  # For words.txt, we use all the words provided in the official dictionary, but also
+  # all the words in the transcripts. This is because the official dictionary is
+  # incomplete and does not contain all the words in the transcripts.
 
-    ./local/prepare_transcripts.py \
-      --input-text-path $lang_dir/train_orig.txt \
-      --output-text-path $lang_dir/train.txt
-  fi
+  # Remove pronunciation variant markers
+  awk '{print $1}' $dl_dir/tedlium3/TEDLIUM.152k.dic |
+  sed 's:([0-9])::g' | sort | uniq > $lang_dir/words_orig.txt
 
-  if [ ! -f $lang_dir/words.txt ]; then
+  # Add words from transcripts. Here are the steps:
+  # 1. Extract the transcripts from the manifest
+  # 2. Remove the quotes
+  # 3. Split into words
+  # 4. Sort and remove duplicates
+  cat <(gunzip -c data/manifests/tedlium_supervisions_train.jsonl.gz |\
+        jq '.text' |\
+        sed 's:"::g' |\
+        grep -o -E '\w+' |\
+        sort -u )> $lang_dir/words_transcript.txt
 
-    awk '{print $1}' $dl_dir/tedlium3/TEDLIUM.152k.dic |
-    sed 's:([0-9])::g' | sort | uniq > $lang_dir/words_orig.txt
+  # Add special words to words.txt
+  echo "<eps> 0" > $lang_dir/words.txt
+  echo "!SIL 1" >> $lang_dir/words.txt
+  echo "<UNK> 2" >> $lang_dir/words.txt
 
-    ./local/prepare_words.py --lang-dir $lang_dir
-  fi
+  # Combine the two sets of words
+  cat $lang_dir/words_orig.txt $lang_dir/words_transcript.txt |\
+    sort -u | awk '{print $0,NR+2}'>> $lang_dir/words.txt
+
+  # Add remaining special word symbols expected by LM scripts.
+  num_words=$(cat $lang_dir/words.txt | wc -l)
+  echo "<s> ${num_words}" >> $lang_dir/words.txt
+  num_words=$(cat $lang_dir/words.txt | wc -l)
+  echo "</s> ${num_words}" >> $lang_dir/words.txt
+  num_words=$(cat $lang_dir/words.txt | wc -l)
+  echo "#0 ${num_words}" >> $lang_dir/words.txt
 fi
 
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
   log "Stage 6: Prepare BPE based lang"
+  lang_dir=data/lang_bpe_500
 
-  for vocab_size in ${vocab_sizes[@]}; do
-    lang_dir=data/lang_bpe_${vocab_size}
-    mkdir -p $lang_dir
-    # We reuse words.txt from phone based lexicon
-    # so that the two can share G.pt later.
-    cp data/lang/words.txt $lang_dir
+  gunzip -c $dl_dir/tedlium3/LM/*.en.gz | sed 's: <\/s>::g' > $lang_dir/train_orig.txt
+  ./local/prepare_transcripts.py \
+    --input-text-path $lang_dir/train_orig.txt \
+    --output-text-path $lang_dir/train.txt
+  
+  # gunzip -c data/manifests/tedlium_supervisions_train.jsonl.gz |\
+  #   jq '.text' |\
+  #   sed 's:"::g' >> $lang_dir/train.txt
 
-    ./local/train_bpe_model.py \
-      --lang-dir $lang_dir \
-      --vocab-size $vocab_size \
-      --transcript data/lang/train.txt
+  # python local/train_bpe_model.py \
+  #   --lang-dir $lang_dir \
+  #   --vocab-size 500 \
+  #   --transcript $lang_dir/train.txt
 
-    if [ ! -f $lang_dir/L_disambig.pt ]; then
-      ./local/prepare_lang_bpe.py --lang-dir $lang_dir --oov "<unk>"
-    fi
-  done
+  if [ ! -f $lang_dir/L_disambig.pt ]; then
+    python local/prepare_lang_bpe.py --lang-dir $lang_dir --oov "<UNK>"
+  fi
 fi
 
 if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
   log "Stage 7: Prepare G"
   # We assume you have install kaldilm, if not, please install
   # it using: pip install kaldilm
+  lang_dir=data/lang_bpe_500
 
   mkdir -p data/lm
-  if [ ! -f data/lm/G_4_gram_small.fst.txt ]; then
-    # It is used in building HLG
-    python3 -m kaldilm \
-      --read-symbol-table="data/lang/words.txt" \
-      --disambig-symbol='#0' \
-      --max-order=4 \
-      --max-arpa-warnings=-1 \
-      $dl_dir/lm/4gram_small.arpa > data/lm/G_4_gram_small.fst.txt
+  if [ ! -f ${lang_dir}/3gram.arpa ]; then
+    ./shared/make_kn_lm.py \
+      -ngram-order 3 \
+      -text $lang_dir/train.txt \
+      -lm $lang_dir/3gram.arpa
   fi
 
-  if [ ! -f data/lm/G_4_gram_big.fst.txt ]; then
-    # It is used for LM rescoring
+  if [ ! -f ${lang_dir}/3gram.fst.txt ]; then
     python3 -m kaldilm \
-      --read-symbol-table="data/lang/words.txt" \
+      --read-symbol-table="$lang_dir/words.txt" \
       --disambig-symbol='#0' \
-      --max-order=4 \
-      --max-arpa-warnings=-1 \
-      $dl_dir/lm/4gram_big.arpa > data/lm/G_4_gram_big.fst.txt
+      --max-order=3 \
+      $lang_dir/3gram.arpa > $lang_dir/3gram.fst.txt
   fi
 fi
 
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
   log "Stage 8: Compile HLG"
 
-  for vocab_size in ${vocab_sizes[@]}; do
-    lang_dir=data/lang_bpe_${vocab_size}
+  lang_dir=data/lang_bpe_500
+  cp $lang_dir/3gram.fst.txt data/lm/G_3_gram.fst.txt
 
-    if [ ! -f $lang_dir/HLG.pt ]; then
-      ./local/compile_hlg.py \
-        --lang-dir $lang_dir \
-        --lm G_4_gram_small
-    fi
-  done
+  if [ ! -f $lang_dir/HLG.pt ]; then
+    ./local/compile_hlg.py \
+      --lang-dir $lang_dir \
+      --lm G_3_gram
+  fi
+fi
+
+if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
+  log "Stage 9: Compile LG"
+
+  lang_dir=data/lang_bpe_500
+  python local/compile_lg.py --lang-dir $lang_dir --lm G_3_gram
+fi
+
+if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
+  log "Stage 10: Prepare bigram token-level P for MTER training"
+
+  lang_dir=data/lang_bpe_500
+
+  if [ ! -f $lang_dir/transcript_tokens.txt ]; then
+    ./local/convert_transcript_words_to_tokens.py \
+      --lexicon $lang_dir/lexicon.txt \
+      --transcript $lang_dir/train.txt \
+      --oov "<UNK>" \
+      > $lang_dir/transcript_tokens.txt
+  fi
+
+  if [ ! -f $lang_dir/P.arpa ]; then
+    ./shared/make_kn_lm.py \
+      -ngram-order 2 \
+      -text $lang_dir/transcript_tokens.txt \
+      -lm $lang_dir/P.arpa
+  fi
+
+  if [ ! -f $lang_dir/P.fst.txt ]; then
+    python3 -m kaldilm \
+      --read-symbol-table="$lang_dir/tokens.txt" \
+      --disambig-symbol='#0' \
+      --max-order=2 \
+      $lang_dir/P.arpa > $lang_dir/P.fst.txt
+  fi
 fi

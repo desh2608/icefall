@@ -214,29 +214,40 @@ def merge_chunks(
             right = cut.end - extra if cut.end < rec.duration else rec.duration
 
             assert len(cut.supervisions) == 1, len(cut.supervisions)
-            alis = cut.supervisions[0].alignment["symbol"]
+            if "token" in cut.supervisions[0].alignment:
+                alis_are_bpe_tokens = True
+                alis = cut.supervisions[0].alignment["token"]
+                min_dur = 0.2
+            elif "word" in cut.supervisions[0].alignment:
+                alis_are_bpe_tokens = False
+                alis = cut.supervisions[0].alignment["word"]
+                min_dur = 0.5
+            else:
+                raise ValueError("No token or word alignment found.")
             for i, ali in enumerate(sorted(alis, key=lambda a: a.start)):
                 t = ali.start + cut.start
                 if left <= t < right:
-                    # We assume that a BPE token can be at most 0.2 seconds long.
                     duration = (
-                        min(0.2, round(alis[i + 1].start - ali.start, 2))
+                        min(min_dur, round(alis[i + 1].start - ali.start, 2))
                         if i < len(alis) - 1
-                        else 0.2
+                        else min_dur
                     )
                     alignments.append(
                         AlignmentItem(start=t, duration=duration, symbol=ali.symbol)
                     )
 
-        # Decode the BPE tokens to text
-        hyp = [ali.symbol for ali in alignments]
-        hyp_text = sp.decode(hyp)
-
-        # We also want to compute word level alignments so we can get CTM file
-        # for scoring with NIST asclite.
-        hyp_word_alignments = get_word_alignments(alignments)
-        # hyp_word_alignments = words_post_processing(hyp_word_alignments)
-        hyp_text = " ".join(ali.symbol for ali in hyp_word_alignments)
+        if alis_are_bpe_tokens:
+            # Decode the BPE tokens to text
+            hyp = [ali.symbol for ali in alignments]
+            hyp_text = sp.decode(hyp)
+            # We also want to compute word level alignments so we can get CTM file
+            # for scoring with NIST asclite.
+            hyp_word_alignments = get_word_alignments(alignments)
+            # hyp_word_alignments = words_post_processing(hyp_word_alignments)
+            hyp_text = " ".join(ali.symbol for ali in hyp_word_alignments)
+        else:
+            hyp_text = " ".join(ali.symbol for ali in alignments)
+            hyp_word_alignments = alignments
 
         new_sup = SupervisionSegment(
             id=rec.id,
@@ -244,7 +255,7 @@ def merge_chunks(
             start=0,
             duration=rec.duration,
             text=hyp_text,
-            alignment={"symbol": alignments, "word": hyp_word_alignments},
+            alignment={"word": hyp_word_alignments},
             language=old_sup.language,
             speaker=old_sup.speaker,
             custom={"orig_text": old_text},
