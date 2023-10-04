@@ -180,10 +180,6 @@ class Hypothesis:
     # It contains only one entry.
     log_prob: torch.Tensor
 
-    # ILM log prob of ys.
-    # It contains only one entry.
-    ilm_log_prob: torch.Tensor = torch.tensor(0.0)
-
     # timestamp[i] is the frame index after subsampling
     # on which ys[i] is decoded
     timestamp: List[int] = field(default_factory=list)
@@ -236,9 +232,6 @@ class HypothesisList(object):
         if key in self:
             old_hyp = self._data[key]  # shallow copy
             torch.logaddexp(old_hyp.log_prob, hyp.log_prob, out=old_hyp.log_prob)
-            torch.logaddexp(
-                old_hyp.ilm_log_prob, hyp.ilm_log_prob, out=old_hyp.ilm_log_prob
-            )
         else:
             self._data[key] = hyp
 
@@ -465,7 +458,6 @@ def modified_beam_search(
         # Additionally, to ensure the the probs of blank and non-blank sum to 1, we
         # need to add the following term to the log-probs of non-blank symbols. This
         # is equivalent to log(1 - sigmoid(logits[..., 0])).
-        # breakpoint()
         nb_shift = logp_b - logits[..., 0]
         nb_shift = nb_shift.unsqueeze(-1)
         log_probs1 = (logits[..., 1:] / temperature).log_softmax(
@@ -537,8 +529,8 @@ def modified_beam_search_lm_shallow_fusion(
     LM: LmScorer,
     beam: int = 4,
     return_timestamps: bool = False,
-    subtract_ilm: bool = False,
-    ilm_scale: float = 1.0,
+    subtract_ilm: bool = True,
+    ilm_scale: float = 0.1,
     temperature: float = 1.0,
 ) -> List[List[int]]:
     """Modified_beam_search + NN LM shallow fusion
@@ -596,7 +588,6 @@ def modified_beam_search_lm_shallow_fusion(
             Hypothesis(
                 ys=[blank_id] * context_size,
                 log_prob=torch.zeros(1, dtype=torch.float32, device=device),
-                ilm_log_prob=torch.zeros(1, dtype=torch.float32, device=device),
                 state=init_states,
                 lm_score=init_score.reshape(-1),
                 timestamp=[],
@@ -627,10 +618,6 @@ def modified_beam_search_lm_shallow_fusion(
             [hyp.log_prob.reshape(1, 1) for hyps in A for hyp in hyps]
         )
 
-        ys_ilm_log_probs = torch.cat(
-            [hyp.ilm_log_prob.reshape(1, 1) for hyps in A for hyp in hyps]
-        )
-
         decoder_input = torch.tensor(
             [hyp.ys[-context_size:] for hyps in A for hyp in hyps],
             device=device,
@@ -659,13 +646,24 @@ def modified_beam_search_lm_shallow_fusion(
         # Additionally, to ensure the the probs of blank and non-blank sum to 1, we
         # need to add the following term to the log-probs of non-blank symbols. This
         # is equivalent to log(1 - sigmoid(logits[..., 0])).
-        # breakpoint()
         nb_shift = logp_b - logits[..., 0]
         nb_shift = nb_shift.unsqueeze(-1)
 
-        log_probs1 = (logits[..., 1:] / temperature).log_softmax(dim=-1) + nb_shift
-        log_probs = torch.cat((logp_b.unsqueeze(-1), log_probs1), dim=-1)
+        if subtract_ilm:
+            ilm_logits = model.joiner(
+                torch.zeros_like(
+                    current_encoder_out, device=current_encoder_out.device
+                ),
+                decoder_out,
+                project_input=False,
+            )
+            ilm_logits = ilm_logits.squeeze(1).squeeze(1)
+            logits[1:] = logits[1:] - ilm_scale * ilm_logits[1:]
+            log_probs1 = (logits[..., 1:]).log_softmax(
+                dim=-1
+            ) + nb_shift  # (num_hyps, vocab_size-1)
 
+        log_probs = torch.cat((logp_b.unsqueeze(-1), log_probs1), dim=-1)
         log_probs.add_(ys_log_probs)
 
         vocab_size = log_probs.size(-1)
@@ -677,17 +675,6 @@ def modified_beam_search_lm_shallow_fusion(
             row_splits=row_splits, cached_tot_size=log_probs.numel()
         )
         ragged_log_probs = k2.RaggedTensor(shape=log_probs_shape, value=log_probs)
-
-        # Also compute the ILM log probs
-        ilm_logits = model.joiner(
-            torch.zeros_like(current_encoder_out, device=current_encoder_out.device),
-            decoder_out,
-            project_input=False,
-        )
-        ilm_logits = ilm_logits.squeeze(1).squeeze(1)
-        # For the ILM, we only need to consider the non-blank tokens
-        ilm_log_probs = (ilm_logits[..., 1:]).log_softmax(dim=-1)
-        ilm_log_probs.add_(ys_ilm_log_probs)
 
         """
         for all hyps with a non-blank new token, score this token.
@@ -752,7 +739,6 @@ def modified_beam_search_lm_shallow_fusion(
         count = 0  # index, used to locate score and lm states
         for i in range(batch_size):
             topk_log_probs, topk_indexes = ragged_log_probs[i].topk(beam)
-            ilm_log_probs_i = ilm_log_probs[i]
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -767,8 +753,6 @@ def modified_beam_search_lm_shallow_fusion(
 
                 lm_score = hyp.lm_score
                 state = hyp.state
-                # default ILM log prob is same as current
-                ilm_log_prob = hyp.ilm_log_prob
 
                 hyp_log_prob = topk_log_probs[k]  # get score of current hyp
                 new_token = topk_token_indexes[k]
@@ -777,12 +761,6 @@ def modified_beam_search_lm_shallow_fusion(
 
                     ys.append(new_token)
                     new_timestamp.append(t)
-
-                    # -1 because we don't have blank token in the ILM log probs
-                    ilm_log_prob = ilm_log_probs_i[new_token - 1]
-
-                    if subtract_ilm:
-                        hyp_log_prob -= ilm_log_prob * ilm_scale
 
                     hyp_log_prob += lm_score[new_token] * lm_scale  # add the lm score
 
@@ -797,7 +775,6 @@ def modified_beam_search_lm_shallow_fusion(
                 new_hyp = Hypothesis(
                     ys=ys,
                     log_prob=hyp_log_prob,
-                    ilm_log_prob=ilm_log_prob,
                     state=state,
                     lm_score=lm_score,
                     timestamp=new_timestamp,
