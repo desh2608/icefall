@@ -64,7 +64,7 @@ def compute_fbank_icsi():
 
     logging.info("Reading manifests")
     manifests = {}
-    for part in ["ihm-mix", "sdm"]:
+    for part in ["sdm"]:
         manifests[part] = read_manifests_if_cached(
             dataset_parts=["train"],
             output_dir=src_dir,
@@ -72,14 +72,14 @@ def compute_fbank_icsi():
             suffix="jsonl.gz",
         )
 
-    for part in ["ihm-mix", "sdm"]:
+    for part in ["sdm"]:
         for split in ["train"]:
             logging.info(f"Processing {part} {split}")
             cuts = CutSet.from_manifests(
                 **manifests[part][split]
             ).compute_and_store_features_batch(
                 extractor=extractor,
-                storage_path=output_dir / f"icsi-{part}_{split}_feats",
+                storage_path=output_dir / f"icsi-{part}_mix_{split}_feats",
                 manifest_path=src_dir / f"cuts_icsi-{part}_{split}.jsonl.gz",
                 batch_duration=5000,
                 num_workers=4,

@@ -17,9 +17,8 @@
 
 
 """
-This file computes fbank features of the AMI dataset.
-We compute features for full recordings (i.e., without trimming to supervisions).
-This way we can create arbitrary segmentations later.
+This file computes fbank features of the trimmed sub-segments which will be
+used for simulating the training mixtures.
 
 The generated fbank features are saved in data/fbank.
 """
@@ -29,7 +28,9 @@ from pathlib import Path
 
 import torch
 import torch.multiprocessing
-from lhotse import CutSet, LilcomChunkyWriter
+import torchaudio
+from lhotse import CutSet, LilcomChunkyWriter, load_manifest
+from lhotse.audio import set_ffmpeg_torchaudio_info_enabled
 from lhotse.features.kaldifeat import (
     KaldifeatFbank,
     KaldifeatFbankConfig,
@@ -37,6 +38,7 @@ from lhotse.features.kaldifeat import (
     KaldifeatMelOptions,
 )
 from lhotse.recipes.utils import read_manifests_if_cached
+from tqdm import tqdm
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -45,9 +47,11 @@ from lhotse.recipes.utils import read_manifests_if_cached
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 torch.multiprocessing.set_sharing_strategy("file_system")
+torchaudio.set_audio_backend("soundfile")
+set_ffmpeg_torchaudio_info_enabled(False)
 
 
-def compute_fbank_ami():
+def compute_fbank_ihm():
     src_dir = Path("data/manifests")
     output_dir = Path("data/fbank")
 
@@ -64,32 +68,38 @@ def compute_fbank_ami():
 
     logging.info("Reading manifests")
     manifests = {}
-    for part in ["sdm"]:
-        manifests[part] = read_manifests_if_cached(
-            dataset_parts=["train", "dev", "test"],
-            output_dir=src_dir,
-            prefix=f"ami-{part}",
-            suffix="jsonl.gz",
-        )
-
-    for part in ["sdm"]:
-        for split in ["train", "dev", "test"]:
-            logging.info(f"Processing {part} {split}")
-            cuts = CutSet.from_manifests(
-                **manifests[part][split]
-            ).compute_and_store_features_batch(
-                extractor=extractor,
-                storage_path=output_dir / f"ami-{part}_mix_{split}_feats",
-                manifest_path=src_dir / f"cuts_ami-{part}_{split}.jsonl.gz",
-                batch_duration=5000,
-                num_workers=4,
-                storage_type=LilcomChunkyWriter,
-                overwrite=True,
+    for data in ["icsi"]:
+        for mic in ["ihm", "sdm"]:
+            manifests[f"{data}-{mic}"] = read_manifests_if_cached(
+                dataset_parts=["train", "dev", "test"],
+                output_dir=src_dir,
+                types=["recordings", "supervisions"],
+                prefix=f"{data}-{mic}",
+                suffix="jsonl.gz",
             )
+
+    logging.info("Computing features")
+    for data in ["icsi"]:
+        for mic in ["ihm", "sdm"]:
+            for part in ["train", "dev", "test"]:
+                logging.info(f"Processing {data}-{mic} {part}")
+                cs = CutSet.from_manifests(**manifests[f"{data}-{mic}"][part])
+                cs = cs.trim_to_supervisions(keep_overlapping=False)
+                cs = cs.normalize_loudness(target=-23.0, affix_id=False)
+                # cs = cs + cs.perturb_speed(0.9) + cs.perturb_speed(1.1)
+                _ = cs.compute_and_store_features_batch(
+                    extractor=extractor,
+                    storage_path=output_dir / f"{data}-{mic}_{part}_feats",
+                    manifest_path=src_dir / f"{data}-{mic}_cuts_{part}.jsonl.gz",
+                    batch_duration=5000,
+                    num_workers=4,
+                    storage_type=LilcomChunkyWriter,
+                    overwrite=True,
+                )
 
 
 if __name__ == "__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     logging.basicConfig(format=formatter, level=logging.INFO)
 
-    compute_fbank_ami()
+    compute_fbank_ihm()
